@@ -1,3 +1,12 @@
-
+@echo off
 cls
-python app.py
+
+myenv\Scripts\activate
+
+echo Starting FastAPI Application...
+
+
+python main.py 
+
+
+pause
