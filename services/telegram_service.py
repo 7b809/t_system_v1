@@ -1,7 +1,7 @@
 import os
 import urllib.request
 import urllib.parse
-import urllib.error  # 1. Added explicit import for handling network-specific exceptions
+import urllib.error
 import json
 import logging
 
@@ -12,14 +12,33 @@ class TelegramNotificationService:
     def __init__(self):
         self.bot_token = os.getenv("TELEGRAM_BOT_TOKEN")
         self.chat_id = os.getenv("TELEGRAM_CHAT_ID")
-        self.enabled = bool(self.bot_token and self.chat_id)
 
-        if not self.enabled:
+        # ----------------------------------------------------
+        # Load the dynamic flag control from config/env
+        # ----------------------------------------------------
+        # Converts truthy string flags like 'true', '1', or 'True' into a Boolean True
+        tele_flag_env = True
+        self.tele_flag = tele_flag_env in ("true", "1", "yes", "on")
+
+        # Credentials check verification
+        self.credentials_valid = bool(self.bot_token and self.chat_id)
+
+        if not self.credentials_valid:
             logger.warning("Telegram credentials missing. Notifications are disabled.")
+        elif not self.tele_flag:
+            logger.info(
+                "Telegram notifications are explicitly disabled via config flag (TELE_FLAG=false)."
+            )
 
     def _send_message(self, text: str):
         """Helper method to send Markdown-formatted messages to Telegram."""
-        if not self.enabled:
+        # 1. First, check if the system credentials are valid
+        if not self.credentials_valid:
+            return
+
+        # 2. Gatekeeper: Enforce the configuration flag check
+        if not self.tele_flag:
+            logger.debug("Telegram message bypassed: TELE_FLAG is set to false.")
             return
 
         url = f"https://api.telegram.org/bot{self.bot_token}/sendMessage"
@@ -37,7 +56,6 @@ class TelegramNotificationService:
                 if response.status != 200:
                     logger.error(f"Telegram API returned status code {response.status}")
 
-        # 2. Intercept explicit HTTP errors to catch code 401 cleanly and avoid verbose tracebacks
         except urllib.error.HTTPError as he:
             if he.code == 401:
                 logger.error(
@@ -100,7 +118,6 @@ class TelegramNotificationService:
         )
         self._send_message(msg)
 
-    # 3. New specific layout method added for expired or invalid broker session keys
     def send_upstox_token_expired(self, date_str: str, error_details: str):
         """Triggered when the Upstox API rejects authentication (Access Token Expired/Invalid)."""
         msg = (
