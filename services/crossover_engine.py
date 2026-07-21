@@ -6,6 +6,7 @@ from db.repositories import UpstoxRepository
 from indicators.ema import EMAIndicator
 from services.preload_service import PreloadService
 from services.candle_builder import CandleBuilder
+from services.dashboard_state import DashboardState
 
 logger = get_logger(__name__)
 
@@ -19,20 +20,42 @@ class CrossoverEngine:
         """
         try:
             return datetime.fromisoformat(candle_timestamp).date().isoformat()
+
         except Exception as ex:
             logger.exception(f"Failed extracting trading date: {ex}")
+
+            DashboardState.update_scheduler_status(
+                "CANDLE_TRADING_DATE_EXTRACTION_FAILED"
+            )
+
             raise
 
     @classmethod
     def process_completed_candle(cls, instrument_key: str, candle: dict):
         """
         Process a completed 1-minute candle.
+
+        Flow:
+        1. Load runtime state.
+        2. Calculate live EMA9 and EMA21.
+        3. Detect crossover.
+        4. Save candle.
+        5. Update runtime memory.
+        6. Persist EMA state to Mongo.
+        7. Update dashboard.
+        8. Save crossover if detected.
         """
+
         try:
             state = PreloadService.get_runtime_by_key(instrument_key)
 
             if not state:
                 logger.warning(f"Runtime state not found for {instrument_key}")
+
+                DashboardState.update_scheduler_status(
+                    "RUNTIME_STATE_NOT_FOUND_FOR_CANDLE"
+                )
+
                 return
 
             close_price = float(candle["close"])
@@ -59,7 +82,9 @@ class CrossoverEngine:
             # Crossover Detection
             # ----------------------------------
             signal, relation = EMAIndicator.detect_crossover(
-                previous_relation=prev_relation, ema_short=ema_short, ema_long=ema_long
+                previous_relation=prev_relation,
+                ema_short=ema_short,
+                ema_long=ema_long,
             )
 
             trading_date = cls.get_trading_date(candle["timestamp"])
@@ -90,7 +115,7 @@ class CrossoverEngine:
             signal_status = signal if signal else "NO_CROSSOVER"
 
             # ----------------------------------
-            # Update Daily Status
+            # Update Daily Status in Mongo
             # ----------------------------------
             UpstoxRepository.update_live_ema_status(
                 instrument_key=instrument_key,
@@ -103,10 +128,27 @@ class CrossoverEngine:
             )
 
             # ----------------------------------
+            # Dashboard EMA / Candle State Update
+            # ----------------------------------
+            DashboardState.update_ema_state(
+                instrument_key=instrument_key,
+                ema_short=ema_short,
+                ema_long=ema_long,
+                last_close=close_price,
+                relation=relation,
+                signal_status=signal_status,
+                candle_timestamp=candle["timestamp"],
+            )
+
+            DashboardState.update_active_candle_count(
+                CandleBuilder.get_total_active_candles()
+            )
+
+            # ----------------------------------
             # Save Crossover
             # ----------------------------------
             if signal and Settings.STORE_CROSSES:
-                # MODIFIED: Map crossover keys exactly to match database snapshot schema requirements
+
                 crossover = {
                     "timestamp": candle["timestamp"],
                     "signal": signal,
@@ -115,16 +157,28 @@ class CrossoverEngine:
                     "price": close_price,
                 }
 
-                # Retrieve strike string format from memory state safely
                 strike_val = getattr(state, "strike", "UNKNOWN")
+                trading_symbol = getattr(state, "trading_symbol", "")
 
-                # Triggers the updated dual-push logic into history and root latest_crosses array
                 UpstoxRepository.save_live_crossover_by_date(
                     instrument_key=instrument_key,
                     trading_date=trading_date,
                     strike=strike_val,
                     crossover_data=crossover,
                 )
+
+                # ----------------------------------
+                # Dashboard Crossover Update
+                # ----------------------------------
+                DashboardState.add_crossover(
+                    instrument_key=instrument_key,
+                    trading_date=trading_date,
+                    crossover_data=crossover,
+                    strike=strike_val,
+                    trading_symbol=trading_symbol,
+                )
+
+                DashboardState.update_scheduler_status(f"{signal}_CROSSOVER_DETECTED")
 
                 logger.info(
                     f"{signal} CROSS | "
@@ -139,53 +193,103 @@ class CrossoverEngine:
         except Exception as ex:
             logger.exception(f"Failed processing candle {instrument_key}: {ex}")
 
+            DashboardState.update_scheduler_status("CANDLE_PROCESSING_FAILED")
+
     @classmethod
     def process_batch(cls, closed_candles: list):
         """
         Process multiple candles.
         """
+
         try:
             if not closed_candles:
                 return
 
             processed = 0
+
             for instrument_key, candle in closed_candles:
+
                 try:
-                    cls.process_completed_candle(instrument_key, candle)
+                    cls.process_completed_candle(
+                        instrument_key,
+                        candle,
+                    )
+
                     processed += 1
+
                 except Exception as ex:
                     logger.exception(f"Batch failed {instrument_key}: {ex}")
 
+                    DashboardState.update_scheduler_status("CANDLE_BATCH_ITEM_FAILED")
+
             logger.info(f"Processed candles: {processed}")
+
+            DashboardState.update_scheduler_status(
+                f"CANDLE_BATCH_PROCESSED_{processed}"
+            )
+
+            DashboardState.update_active_candle_count(
+                CandleBuilder.get_total_active_candles()
+            )
+
         except Exception as ex:
             logger.exception(f"Batch processing failed: {ex}")
+
+            DashboardState.update_scheduler_status("CANDLE_BATCH_PROCESSING_FAILED")
 
     @classmethod
     def flush_pending_candles(cls):
         """
         Flush all active candles before websocket shutdown.
         """
+
         try:
             active = CandleBuilder.get_all_active_candles()
+
             logger.info(f"Flushing {len(active)} active candles.")
 
+            DashboardState.update_scheduler_status(
+                f"FLUSHING_{len(active)}_ACTIVE_CANDLES"
+            )
+
             for instrument_key in list(active.keys()):
+
                 try:
                     candle = CandleBuilder.force_close_candle(instrument_key)
+
                     if candle:
-                        cls.process_completed_candle(instrument_key, candle)
+                        cls.process_completed_candle(
+                            instrument_key,
+                            candle,
+                        )
+
                 except Exception as ex:
                     logger.exception(f"Flush failed {instrument_key}: {ex}")
+
+                    DashboardState.update_scheduler_status(
+                        "ACTIVE_CANDLE_FLUSH_ITEM_FAILED"
+                    )
+
+            DashboardState.update_active_candle_count(
+                CandleBuilder.get_total_active_candles()
+            )
+
+            DashboardState.update_scheduler_status("ACTIVE_CANDLE_FLUSH_COMPLETED")
+
         except Exception as ex:
             logger.exception(f"Flush pending candles failed: {ex}")
+
+            DashboardState.update_scheduler_status("ACTIVE_CANDLE_FLUSH_FAILED")
 
     @classmethod
     def get_signal_summary(cls, instrument_key: str):
         """
         Get runtime signal summary.
         """
+
         try:
             state = PreloadService.get_runtime_by_key(instrument_key)
+
             if not state:
                 return None
 
@@ -201,8 +305,12 @@ class CrossoverEngine:
                 "is_bullish": state.is_bullish,
                 "is_bearish": state.is_bearish,
             }
+
         except Exception as ex:
             logger.exception(f"Signal summary failed {instrument_key}: {ex}")
+
+            DashboardState.update_scheduler_status("SIGNAL_SUMMARY_FAILED")
+
             return None
 
     @classmethod
@@ -210,15 +318,19 @@ class CrossoverEngine:
         """
         Runtime monitoring stats.
         """
+
         try:
             runtime = PreloadService.get_runtime_state()
+
             total = len(runtime)
             bullish = 0
             bearish = 0
 
             for state in runtime.values():
+
                 if state.is_bullish:
                     bullish += 1
+
                 if state.is_bearish:
                     bearish += 1
 
@@ -228,5 +340,12 @@ class CrossoverEngine:
             logger.info(f"Bullish Trend     : {bullish}")
             logger.info(f"Bearish Trend     : {bearish}")
             logger.info("=" * 60)
+
+            DashboardState.update_active_candle_count(
+                CandleBuilder.get_total_active_candles()
+            )
+
         except Exception as ex:
             logger.exception(f"Runtime stats failed: {ex}")
+
+            DashboardState.update_scheduler_status("RUNTIME_STATS_FAILED")

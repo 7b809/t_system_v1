@@ -11,8 +11,15 @@ class Settings:
     Application Settings
     """
 
+    SHOW_LOGS_FLAG = True
+    SHOW_LOGS = True
+    NIFTY_INDEX_INSTRUMENT_KEY = os.getenv("NIFTY_INDEX_INSTRUMENT_KEY")
+    # =====================================================
+    # UPSTOX API
+    # =====================================================
+
     API_VERSION = os.getenv("UPSTOX_API_VERSION", "2.0")
-    UPSTOX_EMA_COLL = os.getenv("UPSTOX_EMA_COLL", "live_ema_analysis")
+
     # =====================================================
     # MONGODB
     # =====================================================
@@ -23,7 +30,15 @@ class Settings:
 
     UPSTOX_TOKEN_COLL = os.getenv("UPSTOX_TOKEN_COLL", "tokens")
 
-    UPSTOX_STRIKES_COLL = os.getenv("UPSTOX_STRIKES_COLL", "option_strikes")
+    UPSTOX_STRIKES_COLL = os.getenv(
+        "UPSTOX_STRIKES_COLL",
+        "option_strikes",
+    )
+
+    UPSTOX_EMA_COLL = os.getenv(
+        "UPSTOX_EMA_COLL",
+        "live_ema_analysis",
+    )
 
     # =====================================================
     # EMA SETTINGS
@@ -49,92 +64,276 @@ class Settings:
 
     MARKET_END_MINUTE = int(os.getenv("MARKET_END_MINUTE", 30))
 
-    PRELOAD_TIME = time(PRELOAD_HOUR, PRELOAD_MINUTE)
+    PRELOAD_TIME = time(
+        PRELOAD_HOUR,
+        PRELOAD_MINUTE,
+    )
 
-    MARKET_START_TIME = time(MARKET_START_HOUR, MARKET_START_MINUTE)
+    MARKET_START_TIME = time(
+        MARKET_START_HOUR,
+        MARKET_START_MINUTE,
+    )
 
-    MARKET_END_TIME = time(MARKET_END_HOUR, MARKET_END_MINUTE)
+    MARKET_END_TIME = time(
+        MARKET_END_HOUR,
+        MARKET_END_MINUTE,
+    )
 
     # =====================================================
     # CANDLE SETTINGS
     # =====================================================
 
-    CANDLE_INTERVAL = os.getenv("CANDLE_INTERVAL", "1minute")
+    CANDLE_INTERVAL = os.getenv(
+        "CANDLE_INTERVAL",
+        "1minute",
+    )
 
-    TELEGRAM_CHAT_ID=os.getenv("TELEGRAM_CHAT_ID")
-    TELEGRAM_BOT_TOKEN=os.getenv("TELEGRAM_BOT_TOKEN")
+    # =====================================================
+    # INTRADAY RECOVERY SETTINGS
+    # =====================================================
+
+    ENABLE_INTRADAY_RECOVERY = (
+        os.getenv(
+            "ENABLE_INTRADAY_RECOVERY",
+            "true",
+        )
+        .strip()
+        .lower()
+        == "true"
+    )
+
+    RECOVERY_INTERVAL = os.getenv(
+        "RECOVERY_INTERVAL",
+        CANDLE_INTERVAL,
+    )
+
+    RECOVERY_MAX_WORKERS = int(
+        os.getenv(
+            "RECOVERY_MAX_WORKERS",
+            10,
+        )
+    )
+
+    # =====================================================
+    # TELEGRAM SETTINGS
+    # =====================================================
+
+    TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+
+    TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+
+    TELE_FLAG = (
+        os.getenv(
+            "TELE_FLAG",
+            "true",
+        )
+        .strip()
+        .lower()
+        == "true"
+    )
 
     # =====================================================
     # WEBSOCKET SETTINGS
     # =====================================================
 
     # UPSTOX_FEED_MODE = os.getenv("UPSTOX_FEED_MODE", "full")
-    UPSTOX_FEED_MODE = os.getenv("UPSTOX_FEED_MODE", "ltpc")
+    UPSTOX_FEED_MODE = os.getenv(
+        "UPSTOX_FEED_MODE",
+        "ltpc",
+    )
 
     RECONNECT_DELAY = int(os.getenv("RECONNECT_DELAY", 5))
 
-    MAX_RECONNECT_ATTEMPTS = int(os.getenv("MAX_RECONNECT_ATTEMPTS", 999999))
+    MAX_RECONNECT_ATTEMPTS = int(
+        os.getenv(
+            "MAX_RECONNECT_ATTEMPTS",
+            999999,
+        )
+    )
 
     # =====================================================
     # SUBSCRIPTION SETTINGS
     # =====================================================
 
-    SUBSCRIBE_BATCH_SIZE = int(os.getenv("SUBSCRIBE_BATCH_SIZE", 100))
+    SUBSCRIBE_BATCH_SIZE = int(
+        os.getenv(
+            "SUBSCRIBE_BATCH_SIZE",
+            100,
+        )
+    )
 
-    SUBSCRIBE_BATCH_SLEEP = float(os.getenv("SUBSCRIBE_BATCH_SLEEP", 0.5))
+    SUBSCRIBE_BATCH_SLEEP = float(
+        os.getenv(
+            "SUBSCRIBE_BATCH_SLEEP",
+            0.5,
+        )
+    )
+
+    # =====================================================
+    # DASHBOARD SETTINGS
+    # =====================================================
+
+    ENABLE_DASHBOARD = (
+        os.getenv(
+            "ENABLE_DASHBOARD",
+            "true",
+        )
+        .strip()
+        .lower()
+        == "true"
+    )
+
+    DASHBOARD_REFRESH_SECONDS = int(
+        os.getenv(
+            "DASHBOARD_REFRESH_SECONDS",
+            2,
+        )
+    )
+
+    DASHBOARD_HOST = os.getenv(
+        "DASHBOARD_HOST",
+        "0.0.0.0",
+    )
+
+    DASHBOARD_PORT = int(
+        os.getenv(
+            "PORT",
+            os.getenv(
+                "DASHBOARD_PORT",
+                8000,
+            ),
+        )
+    )
+
+    # Optional.
+    # Use this only if you subscribe NIFTY index feed along with option strikes.
+    #
+    # Example .env:
+    # NIFTY_INDEX_INSTRUMENT_KEY=NSE_INDEX|Nifty 50
+    #
+    # If blank, dashboard will still work, but NIFTY header will show "--".
+    NIFTY_INDEX_INSTRUMENT_KEY = os.getenv(
+        "NIFTY_INDEX_INSTRUMENT_KEY",
+        "",
+    )
 
     # =====================================================
     # SCHEDULER SETTINGS
     # =====================================================
 
-    SCHEDULER_SLEEP_SECONDS = int(os.getenv("SCHEDULER_SLEEP_SECONDS", 15))
+    SCHEDULER_SLEEP_SECONDS = int(
+        os.getenv(
+            "SCHEDULER_SLEEP_SECONDS",
+            15,
+        )
+    )
 
-    STATS_INTERVAL_SECONDS = int(os.getenv("STATS_INTERVAL_SECONDS", 300))
+    STATS_INTERVAL_SECONDS = int(
+        os.getenv(
+            "STATS_INTERVAL_SECONDS",
+            300,
+        )
+    )
 
     # =====================================================
     # DATA STORAGE SETTINGS
     # =====================================================
 
-    STORE_CROSSES = os.getenv("STORE_CROSSES", "true").lower() == "true"
+    STORE_CROSSES = (
+        os.getenv(
+            "STORE_CROSSES",
+            "true",
+        )
+        .strip()
+        .lower()
+        == "true"
+    )
 
-    STORE_TODAY_CANDLES = os.getenv("STORE_TODAY_CANDLES", "true").lower() == "true"
+    STORE_TODAY_CANDLES = (
+        os.getenv(
+            "STORE_TODAY_CANDLES",
+            "true",
+        )
+        .strip()
+        .lower()
+        == "true"
+    )
 
-    STORE_MASTER_CANDLES = os.getenv("STORE_MASTER_CANDLES", "true").lower() == "true"
+    STORE_MASTER_CANDLES = (
+        os.getenv(
+            "STORE_MASTER_CANDLES",
+            "true",
+        )
+        .strip()
+        .lower()
+        == "true"
+    )
 
     # =====================================================
     # LOGGING
     # =====================================================
 
-    LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
+    LOG_LEVEL = os.getenv(
+        "LOG_LEVEL",
+        "INFO",
+    )
 
-    LOG_RETENTION_DAYS = int(os.getenv("LOG_RETENTION_DAYS", 30))
+    LOG_RETENTION_DAYS = int(
+        os.getenv(
+            "LOG_RETENTION_DAYS",
+            30,
+        )
+    )
 
     # =====================================================
     # APPLICATION
     # =====================================================
 
-    APP_NAME = os.getenv("APP_NAME", "UPSTOX_EMA_CROSSOVER_ENGINE")
+    APP_NAME = os.getenv(
+        "APP_NAME",
+        "UPSTOX_EMA_CROSSOVER_ENGINE",
+    )
 
-    APP_VERSION = os.getenv("APP_VERSION", "1.0.0")
+    APP_VERSION = os.getenv(
+        "APP_VERSION",
+        "1.0.0",
+    )
 
     # =====================================================
     # TIMEZONE
     # =====================================================
 
-    TIMEZONE = os.getenv("TIMEZONE", "Asia/Kolkata")
+    TIMEZONE = os.getenv(
+        "TIMEZONE",
+        "Asia/Kolkata",
+    )
 
     # =====================================================
     # TOKEN SETTINGS
     # =====================================================
 
     ACCESS_TOKEN_DOCUMENT_ID = os.getenv(
-        "ACCESS_TOKEN_DOCUMENT_ID", "upstox_access_token"
+        "ACCESS_TOKEN_DOCUMENT_ID",
+        "upstox_access_token",
     )
 
     # =====================================================
     # HEALTH CHECK
     # =====================================================
 
-    ENABLE_HEALTH_CHECK = os.getenv("ENABLE_HEALTH_CHECK", "true").lower() == "true"
+    ENABLE_HEALTH_CHECK = (
+        os.getenv(
+            "ENABLE_HEALTH_CHECK",
+            "true",
+        )
+        .strip()
+        .lower()
+        == "true"
+    )
 
-    HEALTH_CHECK_INTERVAL_SECONDS = int(os.getenv("HEALTH_CHECK_INTERVAL_SECONDS", 60))
+    HEALTH_CHECK_INTERVAL_SECONDS = int(
+        os.getenv(
+            "HEALTH_CHECK_INTERVAL_SECONDS",
+            60,
+        )
+    )

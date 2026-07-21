@@ -1,9 +1,10 @@
 from datetime import datetime
+from zoneinfo import ZoneInfo
 
 import upstox_client
 from upstox_client.rest import ApiException
-from zoneinfo import ZoneInfo
 
+from config.settings import Settings
 from core.logger import get_logger
 
 logger = get_logger(__name__)
@@ -15,6 +16,11 @@ class MarketStatusService:
 
     @classmethod
     def get_market_status(cls, date_str: str):
+        """
+        Fetch market status / exchange timings for a given date.
+
+        Uses cache to avoid repeated API calls for the same date.
+        """
 
         try:
 
@@ -39,44 +45,59 @@ class MarketStatusService:
 
             return None
 
+        except Exception as ex:
+
+            logger.exception(
+                f"Unexpected error while fetching market status for {date_str}: {ex}"
+            )
+
+            return None
+
     @classmethod
     def is_market_open_today(cls):
+        """
+        Check whether NSE has a trading session today.
+        """
 
         try:
 
-            today = (
-                datetime.now(
-                    ZoneInfo("Asia/Kolkata")
-                ).date().isoformat()
-            )
+            today = datetime.now(ZoneInfo(Settings.TIMEZONE)).date().isoformat()
 
             response = cls.get_market_status(today)
 
             if not response:
+
+                logger.warning(f"No market status response received for {today}")
+
                 return False
 
-            for exchange in response.data:
+            response_data = getattr(response, "data", None)
 
-                if exchange.exchange == "NSE":
+            if not response_data:
+
+                logger.info(f"No exchange timing data available for {today}")
+
+                return False
+
+            for exchange in response_data:
+
+                if getattr(exchange, "exchange", None) == "NSE":
 
                     logger.info(
-                        f"NSE Session Found "
-                        f"| Start={exchange.start_time} "
-                        f"| End={exchange.end_time}"
+                        f"NSE Session Found | "
+                        f"Date={today} | "
+                        f"Start={getattr(exchange, 'start_time', None)} | "
+                        f"End={getattr(exchange, 'end_time', None)}"
                     )
 
                     return True
 
-            logger.info(
-                f"NSE session not found for {today}"
-            )
+            logger.info(f"NSE session not found for {today}")
 
             return False
 
         except Exception as ex:
 
-            logger.exception(
-                f"Failed checking market open today: {ex}"
-            )
+            logger.exception(f"Failed checking market open today: {ex}")
 
             return False

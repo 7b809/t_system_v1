@@ -2,6 +2,10 @@ from datetime import datetime
 from threading import Lock
 
 from core.logger import get_logger
+from config.settings import Settings
+
+SHOW_LOGS = Settings.SHOW_LOGS_FLAG
+
 
 logger = get_logger(__name__)
 
@@ -125,7 +129,8 @@ class CandleBuilder:
                     volume,
                 )
 
-                logger.info(
+                if SHOW_LOGS:
+                    logger.info(
                     f"Candle completed "
                     f"| {instrument_key} "
                     f"| O={completed_candle['open']} "
