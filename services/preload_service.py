@@ -17,18 +17,32 @@ class PreloadService:
     Loads all strike documents and builds runtime EMA state before market open
     or during market hours.
 
-    Startup behavior:
+    New compact MongoDB format:
 
-    Before market open:
-        Live Mongo snapshot state is used.
-
-    During market hours:
-        Live Mongo snapshot state is loaded first,
-        then missing intraday candles are replayed on top of that snapshot.
+    {
+        "instrument_key": "...",
+        "trading_symbol": "...",
+        "strike": 24150,
+        "type": "CE",
+        "daily": {
+            "YYYY-MM-DD": {
+                "status": "NO_CROSSOVER",
+                "total_crosses": 0,
+                "crosses": []
+            }
+        },
+        "last_updated_date": "YYYY-MM-DD",
+        "last_updated": "..."
+    }
 
     Important:
-    Intraday recovery does not require Upstox access token.
-    Access token is required only for live feed subscription.
+    Compact Mongo format does not persist EMA values.
+    Runtime EMA values are maintained in memory.
+
+    Intraday recovery can rebuild EMA during market hours by fetching
+    intraday candles from Upstox HistoryApi.
+
+    Access token is required only for live WebSocket feed subscription.
     """
 
     RUNTIME_STATE = {}
@@ -128,29 +142,74 @@ class PreloadService:
     @classmethod
     def _load_ema_state(cls, strike_doc: dict):
         """
-        Extract runtime EMA state from available Mongo snapshot fields.
+        Load runtime EMA state.
 
-        Priority:
-        1. latest_crosses root array
-        2. latest valid daily bucket scanned in reverse date order
-        3. fallback zero state
+        New compact Mongo format does not store:
+        - ema_short
+        - ema_long
+        - last_price
+        - candle_timestamp
+        - latest_crosses
 
-        Important:
-        This method skips empty daily buckets where ema_short/ema_long/last_price
-        are None. This prevents today's newly-created empty bucket from forcing
-        a bad zero-state recovery.
+        So this method supports three possibilities:
+
+        1. Optional future root runtime snapshot:
+            {
+                "runtime": {
+                    "ema_short": 32.62,
+                    "ema_long": 36.40,
+                    "last_close": 29.60,
+                    "relation": "BELOW"
+                }
+            }
+
+        2. Backward compatibility with old existing documents:
+            - latest_crosses
+            - daily.<date>.ema_short
+            - daily.<date>.ema_long
+            - daily.<date>.last_price
+
+        3. Fallback zero state:
+            EMA starts from 0.0 and intraday recovery/live candles update it.
         """
 
         try:
             instrument_key = strike_doc.get("instrument_key")
 
+            # ----------------------------------------------------
+            # Priority 1: Optional future root runtime snapshot
+            # ----------------------------------------------------
+            runtime = strike_doc.get("runtime", {})
+
+            if isinstance(runtime, dict):
+                ema_short = runtime.get("ema_short")
+                ema_long = runtime.get("ema_long")
+                last_close = runtime.get("last_close")
+                relation = runtime.get("relation")
+
+                if (
+                    ema_short is not None
+                    and ema_long is not None
+                    and last_close is not None
+                    and relation
+                ):
+                    logger.debug(
+                        f"State resolved via runtime snapshot for {instrument_key}"
+                    )
+
+                    return {
+                        "ema_short": float(ema_short),
+                        "ema_long": float(ema_long),
+                        "last_close": float(last_close),
+                        "relation": str(relation),
+                    }
+
+            # ----------------------------------------------------
+            # Priority 2: Backward compatibility with old latest_crosses
+            # ----------------------------------------------------
             latest_crosses = strike_doc.get("latest_crosses", [])
 
-            # ----------------------------------------------------
-            # Priority 1: Root latest_crosses snapshot
-            # ----------------------------------------------------
             if latest_crosses and isinstance(latest_crosses, list):
-
                 latest_cross = latest_crosses[-1]
 
                 ema_short = latest_cross.get("ema_short")
@@ -165,14 +224,13 @@ class PreloadService:
                 signal = latest_cross.get("signal")
 
                 if ema_short is not None and ema_long is not None:
-
                     relation = "ABOVE" if signal == "BULLISH" else "BELOW"
 
                     if last_price is None:
                         last_price = ema_short
 
                     logger.debug(
-                        f"State resolved via latest_crosses for {instrument_key}"
+                        f"State resolved via old latest_crosses for {instrument_key}"
                     )
 
                     return {
@@ -183,14 +241,12 @@ class PreloadService:
                     }
 
             # ----------------------------------------------------
-            # Priority 2: Scan daily buckets in reverse order
+            # Priority 3: Backward compatibility with old daily EMA fields
             # ----------------------------------------------------
             daily = strike_doc.get("daily", {})
 
             if daily and isinstance(daily, dict):
-
                 for daily_date in sorted(daily.keys(), reverse=True):
-
                     daily_data = daily.get(daily_date, {})
 
                     if not isinstance(daily_data, dict):
@@ -205,13 +261,12 @@ class PreloadService:
                         and ema_long is not None
                         and last_price is not None
                     ):
-
                         relation = (
                             "ABOVE" if float(ema_short) > float(ema_long) else "BELOW"
                         )
 
                         logger.debug(
-                            f"State resolved via daily bucket "
+                            f"State resolved via old daily EMA bucket "
                             f"{daily_date} for {instrument_key}"
                         )
 
@@ -223,11 +278,12 @@ class PreloadService:
                         }
 
             # ----------------------------------------------------
-            # Fallback 3: Empty/default state
+            # Fallback: compact document has no EMA snapshot
             # ----------------------------------------------------
             logger.warning(
-                f"No valid snapshot or daily EMA state found for "
-                f"{instrument_key}. Bootstrapping flat zero state."
+                f"No EMA snapshot found for {instrument_key}. "
+                f"Using zero EMA state. "
+                f"If market is open, intraday recovery should rebuild EMA."
             )
 
             return {
@@ -238,9 +294,9 @@ class PreloadService:
             }
 
         except Exception as ex:
-            logger.exception(f"Failed loading EMA state from snapshot fields: {ex}")
+            logger.exception(f"Failed loading EMA state from compact snapshot: {ex}")
 
-            DashboardState.update_scheduler_status("EMA_SNAPSHOT_LOAD_FAILED")
+            DashboardState.update_scheduler_status("COMPACT_EMA_STATE_LOAD_FAILED")
 
             raise
 
@@ -254,10 +310,10 @@ class PreloadService:
         Process one instrument.
 
         Steps:
-        1. Ensure today's live EMA bucket exists.
-        2. Fetch latest live EMA document from live_ema_analysis.
-        3. Load base EMA snapshot from live EMA document.
-        4. If market is currently open, replay missing intraday candles.
+        1. Ensure today's compact live EMA bucket exists.
+        2. Fetch latest compact live EMA document.
+        3. Load base EMA state.
+        4. If market is currently open, run intraday recovery.
         5. Create StrikeState runtime object.
 
         Note:
@@ -272,7 +328,7 @@ class PreloadService:
                 return None, "skipped"
 
             # ----------------------------------------------------
-            # Ensure daily document exists in live EMA collection
+            # Ensure compact daily document exists in live EMA collection
             # ----------------------------------------------------
             UpstoxRepository.ensure_daily_document(
                 instrument_key=instrument_key,
@@ -280,7 +336,7 @@ class PreloadService:
             )
 
             # ----------------------------------------------------
-            # Fetch latest live EMA document
+            # Fetch compact live EMA document
             # ----------------------------------------------------
             live_doc = UpstoxRepository.get_live_ema_document(
                 instrument_key=instrument_key
@@ -293,10 +349,11 @@ class PreloadService:
                     f"Live EMA document not found for {instrument_key}. "
                     f"Falling back to master strike document."
                 )
+
                 snapshot_doc = strike_doc
 
             # ----------------------------------------------------
-            # Base EMA snapshot from live Mongo state
+            # Base EMA snapshot
             # ----------------------------------------------------
             base_ema_state = cls._load_ema_state(snapshot_doc)
 
@@ -304,33 +361,26 @@ class PreloadService:
 
             # ----------------------------------------------------
             # Apply intraday recovery during market hours
-            # Token is not required for HistoryApi candle recovery.
             # ----------------------------------------------------
             if cls.should_run_intraday_recovery():
-
                 recovery_result = IntradayRecoveryService.recover_single_instrument(
                     strike_doc=snapshot_doc,
                     base_state=base_ema_state,
                 )
 
                 if recovery_result:
-
                     ema_state = recovery_result["ema_state"]
 
                 else:
-
                     logger.warning(
-                        f"Intraday recovery failed or unavailable "
-                        f"for {instrument_key}. "
-                        f"Using Mongo snapshot state."
+                        f"Intraday recovery failed or unavailable for "
+                        f"{instrument_key}. Using base EMA state."
                     )
 
                     ema_state = base_ema_state
 
             # ----------------------------------------------------
             # Build runtime StrikeState
-            # Use original strike_doc for symbol metadata if live_doc
-            # does not contain all master fields.
             # ----------------------------------------------------
             metadata_doc = live_doc or strike_doc
 
@@ -347,7 +397,6 @@ class PreloadService:
             return (instrument_key, strike_state), "loaded"
 
         except Exception as ex:
-
             logger.exception(
                 f"Failed processing strike {strike_doc.get('instrument_key')}: {ex}"
             )
@@ -386,10 +435,10 @@ class PreloadService:
             else:
                 logger.info(
                     "Startup outside active market recovery window. "
-                    "Using Mongo snapshot state."
+                    "Using compact Mongo snapshot state."
                 )
 
-                DashboardState.update_scheduler_status("USING_MONGO_SNAPSHOT_STATE")
+                DashboardState.update_scheduler_status("USING_COMPACT_MONGO_STATE")
 
             total_loaded = 0
             total_skipped = 0
@@ -417,7 +466,6 @@ class PreloadService:
             )
 
             with ThreadPoolExecutor(max_workers=max_workers) as executor:
-
                 futures = {
                     executor.submit(
                         cls._process_single_strike,
@@ -428,12 +476,10 @@ class PreloadService:
                 }
 
                 for future in as_completed(futures):
-
                     try:
                         result, status = future.result()
 
                         if status == "loaded" and result:
-
                             inst_key, strike_state = result
 
                             cls.RUNTIME_STATE[inst_key] = strike_state
@@ -441,11 +487,9 @@ class PreloadService:
                             total_loaded += 1
 
                         else:
-
                             total_skipped += 1
 
                     except Exception as strike_ex:
-
                         total_skipped += 1
 
                         strike_doc = futures[future]
@@ -486,7 +530,6 @@ class PreloadService:
             return cls.RUNTIME_STATE
 
         except Exception as ex:
-
             logger.exception(f"Runtime initialization failed: {ex}")
 
             DashboardState.update_scheduler_status("RUNTIME_INITIALIZATION_FAILED")
@@ -534,7 +577,6 @@ class PreloadService:
             state = cls.RUNTIME_STATE.get(instrument_key)
 
             if not state:
-
                 logger.warning(f"Runtime state missing for {instrument_key}")
 
                 DashboardState.update_scheduler_status(
@@ -544,7 +586,6 @@ class PreloadService:
                 return
 
             if "ema_short" in updates:
-
                 state.update_ema(
                     ema_short=updates.get(
                         "ema_short",
@@ -567,7 +608,6 @@ class PreloadService:
                 DashboardState.load_instrument_from_preload(state)
 
         except Exception as ex:
-
             logger.exception(f"Runtime update failed {instrument_key}: {ex}")
 
             DashboardState.update_scheduler_status("RUNTIME_STATE_UPDATE_FAILED")
@@ -582,7 +622,6 @@ class PreloadService:
             return list(cls.RUNTIME_STATE.keys())
 
         except Exception as ex:
-
             logger.exception(f"Failed loading instrument keys: {ex}")
 
             DashboardState.update_scheduler_status(
@@ -616,7 +655,6 @@ class PreloadService:
             ]
 
         except Exception as ex:
-
             logger.exception(f"Failed creating batches: {ex}")
 
             DashboardState.update_scheduler_status("SUBSCRIPTION_BATCH_CREATE_FAILED")
@@ -652,7 +690,6 @@ class PreloadService:
             )
 
         except Exception as ex:
-
             logger.exception(f"Failed startup summary: {ex}")
 
             DashboardState.update_scheduler_status("STARTUP_SUMMARY_PRINT_FAILED")

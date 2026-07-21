@@ -17,6 +17,10 @@ class UpstoxRepository:
     _REFRESH_INTERVAL = 300  # seconds
     _LOCK = threading.RLock()
 
+    # =====================================================
+    # ACCESS TOKEN METHODS
+    # =====================================================
+
     @classmethod
     def _refresh_access_token(cls) -> str:
         """
@@ -77,6 +81,10 @@ class UpstoxRepository:
             logger.info("Forced refresh of access token.")
             return cls._refresh_access_token()
 
+    # =====================================================
+    # MASTER STRIKE FETCH METHODS
+    # =====================================================
+
     @staticmethod
     def get_all_strikes():
         """
@@ -84,7 +92,9 @@ class UpstoxRepository:
         """
         try:
             strikes = list(MongoApp.get_strikes_collection().find({}))
+
             logger.info(f"Loaded {len(strikes)} strike documents.")
+
             return strikes
 
         except Exception as ex:
@@ -132,14 +142,14 @@ class UpstoxRepository:
             logger.exception(f"Failed to fetch strike {instrument_key}: {ex}")
             raise
 
+    # =====================================================
+    # LIVE EMA DOCUMENT FETCH
+    # =====================================================
+
     @staticmethod
     def get_live_ema_document(instrument_key: str):
         """
-        Fetch live EMA document from live_ema_analysis collection.
-
-        This is used during preload/recovery so the base EMA state
-        comes from the latest live EMA document, not only from the
-        master option_strikes document.
+        Fetch compact live EMA document from live_ema_analysis collection.
         """
         try:
             return MongoApp.get_live_ema_collection().find_one(
@@ -150,6 +160,136 @@ class UpstoxRepository:
             logger.exception(f"Failed loading live EMA document {instrument_key}: {ex}")
             return None
 
+    # =====================================================
+    # INTERNAL HELPERS FOR COMPACT DOC FORMAT
+    # =====================================================
+
+    @staticmethod
+    def _clean_crossover(crossover: dict) -> dict:
+        """
+        Convert internal crossover object into compact Mongo format.
+
+        Stored crossover format:
+
+        {
+            "timestamp": "...",
+            "signal": "BULLISH/BEARISH",
+            "price": 121.40
+        }
+
+        EMA values are intentionally not persisted in MongoDB.
+        """
+
+        try:
+            if not crossover:
+                return {}
+
+            return {
+                "timestamp": crossover.get("timestamp"),
+                "signal": crossover.get("signal"),
+                "price": (
+                    crossover.get("price")
+                    or crossover.get("last_price")
+                    or crossover.get("close")
+                ),
+            }
+
+        except Exception as ex:
+            logger.exception(f"Failed cleaning crossover: {ex}")
+            return {}
+
+    @staticmethod
+    def _keep_last_5_daily_buckets(instrument_key: str):
+        """
+        Keep only latest 5 date buckets inside daily.
+
+        Example:
+
+        daily: {
+            2026-07-17,
+            2026-07-18,
+            2026-07-19,
+            2026-07-20,
+            2026-07-21
+        }
+
+        If more than 5 dates exist, older dates are removed.
+        """
+
+        try:
+            doc = MongoApp.get_live_ema_collection().find_one(
+                {"instrument_key": instrument_key},
+                {"daily": 1},
+            )
+
+            if not doc:
+                return
+
+            daily = doc.get("daily", {})
+
+            if not isinstance(daily, dict):
+                return
+
+            dates = sorted(daily.keys())
+
+            if len(dates) <= 5:
+                return
+
+            old_dates = dates[:-5]
+
+            unset_fields = {f"daily.{date_key}": "" for date_key in old_dates}
+
+            if unset_fields:
+                MongoApp.get_live_ema_collection().update_one(
+                    {"instrument_key": instrument_key},
+                    {"$unset": unset_fields},
+                )
+
+                logger.info(
+                    f"Old daily buckets pruned | "
+                    f"{instrument_key} | Removed={old_dates}"
+                )
+
+        except Exception as ex:
+            logger.exception(
+                f"Failed pruning old daily buckets {instrument_key}: {ex}"
+            )
+
+    @staticmethod
+    def _get_compact_status(signal_status: str | None) -> str:
+        """
+        Normalize status value for compact daily format.
+
+        Allowed values:
+        - BULLISH
+        - BEARISH
+        - NO_CROSSOVER
+        - ABOVE
+        - BELOW
+
+        For relation values:
+        ABOVE remains ABOVE for dashboard/runtime compatibility if passed.
+        BELOW remains BELOW.
+        """
+
+        try:
+            if not signal_status:
+                return "NO_CROSSOVER"
+
+            value = str(signal_status).strip().upper()
+
+            if value in {"BULLISH", "BEARISH", "NO_CROSSOVER", "ABOVE", "BELOW"}:
+                return value
+
+            return "NO_CROSSOVER"
+
+        except Exception:
+            return "NO_CROSSOVER"
+
+    # =====================================================
+    # CANDLE STORAGE - DISABLED FOR NEW FORMAT
+    # =====================================================
+
     @staticmethod
     def append_candle(
         instrument_key: str,
@@ -157,106 +297,136 @@ class UpstoxRepository:
         trading_date: str,
     ):
         """
-        Append candle into:
-        - candles
+        Candle storage disabled.
+
+        New compact Mongo format does not store:
+        - root candles
         - daily.<date>.today_candles
+
+        This method is intentionally kept as no-op so existing callers
+        do not break.
         """
-        try:
-            result = MongoApp.get_live_ema_collection().update_one(
-                {"instrument_key": instrument_key},
-                {
-                    "$push": {
-                        "candles": candle,
-                        f"daily.{trading_date}.today_candles": candle,
-                    }
-                },
+
+        if SHOW_LOGS:
+            logger.debug(
+                f"Candle storage skipped by compact format | "
+                f"{instrument_key} | Date={trading_date}"
             )
 
-            if SHOW_LOGS:
+        return None
+
+    # =====================================================
+    # DAILY DOCUMENT ENSURE
+    # =====================================================
+
+    @staticmethod
+    def ensure_daily_document(
+        instrument_key: str,
+        trading_date: str,
+    ):
+        """
+        Ensure compact live EMA document and today's daily bucket exist.
+
+        New daily format:
+
+        daily.<date> = {
+            "status": "NO_CROSSOVER",
+            "total_crosses": 0,
+            "crosses": []
+        }
+
+        Also keeps only latest 5 daily buckets.
+        """
+
+        try:
+            live_doc = MongoApp.get_live_ema_collection().find_one(
+                {"instrument_key": instrument_key}
+            )
+
+            # --------------------------------------------------
+            # First time: create compact live document from master strike
+            # --------------------------------------------------
+            if not live_doc:
+                master_doc = MongoApp.get_strikes_collection().find_one(
+                    {"instrument_key": instrument_key}
+                )
+
+                if not master_doc:
+                    raise Exception(
+                        f"Master strike document not found: {instrument_key}"
+                    )
+
+                compact_doc = {
+                    "instrument_key": master_doc.get("instrument_key"),
+                    "trading_symbol": master_doc.get("trading_symbol", ""),
+                    "strike": master_doc.get("strike"),
+                    "type": master_doc.get("type"),
+                    "daily": {
+                        trading_date: {
+                            "status": "NO_CROSSOVER",
+                            "total_crosses": 0,
+                            "crosses": [],
+                        }
+                    },
+                    "last_updated_date": trading_date,
+                    "last_updated": datetime.now(timezone.utc),
+                }
+
+                MongoApp.get_live_ema_collection().insert_one(compact_doc)
+
                 logger.info(
-                f"Candle saved | {instrument_key} | "
-                f"modified={result.modified_count}"
-            )
+                    f"Created compact live EMA document | {instrument_key}"
+                )
 
-            return result
+                return compact_doc
 
-        except Exception as ex:
-            logger.exception(f"Failed to save candle {instrument_key}: {ex}")
-            return None
+            # --------------------------------------------------
+            # Existing document: ensure today's bucket exists
+            # --------------------------------------------------
+            daily = live_doc.get("daily", {})
 
-    @staticmethod
-    def save_crossover(
-        instrument_key: str,
-        trading_date: str,
-        crossover: dict,
-    ):
-        """
-        Save bullish/bearish crossover.
-        """
-        try:
-            result = MongoApp.get_live_ema_collection().update_one(
-                {"instrument_key": instrument_key},
-                {"$push": {f"daily.{trading_date}.crosses_today": crossover}},
-            )
+            if not isinstance(daily, dict):
+                daily = {}
 
-            logger.info(
-                f"Crossover saved | "
-                f"{instrument_key} | "
-                f"{crossover.get('signal')}"
-            )
+            daily_data = daily.get(trading_date)
 
-            return result
+            if daily_data:
+                UpstoxRepository._keep_last_5_daily_buckets(instrument_key)
+                return live_doc
 
-        except Exception as ex:
-            logger.exception(f"Failed saving crossover {instrument_key}: {ex}")
-            return None
-
-    @staticmethod
-    def save_live_crossover_by_date(
-        instrument_key: str,
-        trading_date: str,
-        strike: str,
-        crossover_data: dict,
-    ):
-        """
-        Saves an EMA crossover nested inside:
-        - daily.<date>.crosses_today
-
-        Also appends it directly to:
-        - latest_crosses
-        """
-        try:
             result = MongoApp.get_live_ema_collection().update_one(
                 {"instrument_key": instrument_key},
                 {
                     "$set": {
-                        "strike": strike,
+                        f"daily.{trading_date}": {
+                            "status": "NO_CROSSOVER",
+                            "total_crosses": 0,
+                            "crosses": [],
+                        },
                         "last_updated": datetime.now(timezone.utc),
                         "last_updated_date": trading_date,
-                        "latest_crosses_date": trading_date,
-                    },
-                    "$push": {
-                        f"daily.{trading_date}.crosses_today": crossover_data,
-                        "latest_crosses": crossover_data,
-                    },
+                    }
                 },
-                upsert=True,
             )
 
+            UpstoxRepository._keep_last_5_daily_buckets(instrument_key)
+
             logger.info(
-                f"Structured crossover saved into history and latest_crosses | "
-                f"{instrument_key} | "
-                f"Date={trading_date} | "
-                f"Signal={crossover_data.get('signal')}"
+                f"Created compact daily bucket | "
+                f"{instrument_key} | Date={trading_date}"
             )
 
             return result
 
         except Exception as ex:
             logger.exception(
-                f"Failed to record crossover references for " f"{instrument_key}: {ex}"
+                f"Failed creating compact daily bucket {instrument_key}: {ex}"
             )
-            raise
+            return None
+
+    # =====================================================
+    # STATUS UPDATE
+    # =====================================================
 
     @staticmethod
     def update_live_ema_status(
@@ -269,132 +439,298 @@ class UpstoxRepository:
         candle_timestamp: str,
     ):
         """
-        Update current EMA values and status during live streaming.
+        Update compact daily status only.
+
+        New format does NOT save:
+        - ema_short
+        - ema_long
+        - last_price
+        - candle_timestamp
+
+        It only updates:
+        - daily.<date>.status
+        - last_updated
+        - last_updated_date
         """
+
         try:
+            UpstoxRepository.ensure_daily_document(
+                instrument_key=instrument_key,
+                trading_date=trading_date,
+            )
+
+            compact_status = UpstoxRepository._get_compact_status(signal_status)
+
             result = MongoApp.get_live_ema_collection().update_one(
                 {"instrument_key": instrument_key},
                 {
                     "$set": {
-                        f"daily.{trading_date}.signal_status": signal_status,
-                        f"daily.{trading_date}.ema_short": ema_short,
-                        f"daily.{trading_date}.ema_long": ema_long,
-                        f"daily.{trading_date}.last_price": last_price,
-                        f"daily.{trading_date}.candle_timestamp": candle_timestamp,
+                        f"daily.{trading_date}.status": compact_status,
                         "last_updated": datetime.now(timezone.utc),
                         "last_updated_date": trading_date,
                     }
                 },
             )
 
-            logger.debug(f"EMA status updated | {instrument_key}")
+            UpstoxRepository._keep_last_5_daily_buckets(instrument_key)
 
-            return result
-
-        except Exception as ex:
-            logger.exception(f"Failed updating EMA status {instrument_key}: {ex}")
-            return None
-
-    @staticmethod
-    def update_last_updated(instrument_key: str):
-        """
-        Update root document last_updated timestamp.
-        """
-        try:
-            result = MongoApp.get_live_ema_collection().update_one(
-                {"instrument_key": instrument_key},
-                {"$set": {"last_updated": datetime.now(timezone.utc)}},
+            logger.debug(
+                f"Compact status updated | "
+                f"{instrument_key} | Date={trading_date} | Status={compact_status}"
             )
 
             return result
 
         except Exception as ex:
-            logger.exception(f"Failed updating last_updated {instrument_key}: {ex}")
+            logger.exception(f"Failed updating compact status {instrument_key}: {ex}")
             return None
 
+    # =====================================================
+    # CROSSOVER SAVE METHODS
+    # =====================================================
+
     @staticmethod
-    def ensure_daily_document(
+    def save_crossover(
         instrument_key: str,
         trading_date: str,
+        crossover: dict,
     ):
         """
-        Ensure the live EMA document and daily.<date> bucket exist.
+        Compatibility wrapper for saving crossover.
 
-        If the instrument does not exist in live EMA collection,
-        copy the master strike document from option_strikes.
+        Saves into:
+        daily.<date>.crosses
 
-        If the current date bucket does not exist,
-        create it and reset latest_crosses for the session.
+        Updates:
+        daily.<date>.total_crosses
+        daily.<date>.status
         """
+
         try:
-            strike = MongoApp.get_live_ema_collection().find_one(
-                {"instrument_key": instrument_key}
+            return UpstoxRepository.save_live_crossover_by_date(
+                instrument_key=instrument_key,
+                trading_date=trading_date,
+                strike="",
+                crossover_data=crossover,
             )
 
-            # --------------------------------------------------
-            # First time: copy master document into live collection
-            # --------------------------------------------------
-            if not strike:
-                master_doc = MongoApp.get_strikes_collection().find_one(
-                    {"instrument_key": instrument_key}
+        except Exception as ex:
+            logger.exception(f"Failed saving compact crossover {instrument_key}: {ex}")
+            return None
+
+    @staticmethod
+    def save_live_crossover_by_date(
+        instrument_key: str,
+        trading_date: str,
+        strike: str,
+        crossover_data: dict,
+    ):
+        """
+        Save live crossover into compact document format.
+
+        New storage path:
+
+        daily.<date>.crosses[]
+
+        Also updates:
+
+        daily.<date>.total_crosses
+        daily.<date>.status
+        last_updated
+        last_updated_date
+        """
+
+        try:
+            UpstoxRepository.ensure_daily_document(
+                instrument_key=instrument_key,
+                trading_date=trading_date,
+            )
+
+            compact_crossover = UpstoxRepository._clean_crossover(crossover_data)
+
+            if not compact_crossover:
+                logger.warning(
+                    f"Empty crossover skipped | {instrument_key} | {trading_date}"
                 )
+                return None
 
-                if not master_doc:
-                    raise Exception(
-                        f"Master strike document not found: {instrument_key}"
-                    )
+            timestamp = compact_crossover.get("timestamp")
 
-                master_doc.pop("_id", None)
+            if not timestamp:
+                logger.warning(
+                    f"Crossover without timestamp skipped | {instrument_key}"
+                )
+                return None
 
-                MongoApp.get_live_ema_collection().insert_one(master_doc)
+            exists = UpstoxRepository.crossover_exists(
+                instrument_key=instrument_key,
+                trading_date=trading_date,
+                timestamp=timestamp,
+            )
 
-                strike = master_doc
+            if exists:
+                logger.info(
+                    f"Duplicate crossover skipped | "
+                    f"{instrument_key} | Date={trading_date} | Timestamp={timestamp}"
+                )
+                return None
 
-                logger.info(f"Created live EMA document for {instrument_key}")
+            signal = compact_crossover.get("signal") or "NO_CROSSOVER"
 
-            # --------------------------------------------------
-            # If today's bucket already exists, nothing to do
-            # --------------------------------------------------
-            daily_data = strike.get("daily", {}).get(trading_date)
-
-            if daily_data:
-                return
-
-            # --------------------------------------------------
-            # Create today's daily bucket
-            # --------------------------------------------------
             result = MongoApp.get_live_ema_collection().update_one(
                 {"instrument_key": instrument_key},
                 {
                     "$set": {
-                        f"daily.{trading_date}": {
-                            "signal": None,
-                            "signal_status": "NO_CROSSOVER",
-                            "crosses_today": [],
-                            "today_candles": [],
-                            "ema_short": None,
-                            "ema_long": None,
-                            "last_price": None,
-                            "candle_timestamp": None,
-                        },
-                        "latest_crosses": [],
-                        "latest_crosses_date": trading_date,
+                        "strike": strike,
+                        f"daily.{trading_date}.status": signal,
                         "last_updated": datetime.now(timezone.utc),
                         "last_updated_date": trading_date,
-                    }
+                    },
+                    "$push": {
+                        f"daily.{trading_date}.crosses": compact_crossover,
+                    },
+                    "$inc": {
+                        f"daily.{trading_date}.total_crosses": 1,
+                    },
                 },
+                upsert=True,
             )
 
+            UpstoxRepository._keep_last_5_daily_buckets(instrument_key)
+
             logger.info(
-                f"Created daily bucket and initialized latest_crosses array | "
-                f"{trading_date} | {instrument_key}"
+                f"Compact crossover saved | "
+                f"{instrument_key} | "
+                f"Date={trading_date} | "
+                f"Signal={signal}"
             )
 
             return result
 
         except Exception as ex:
-            logger.exception(f"Failed creating daily bucket {instrument_key}: {ex}")
+            logger.exception(
+                f"Failed saving compact crossover for {instrument_key}: {ex}"
+            )
+            raise
+
+    @staticmethod
+    def save_recovered_crossovers(
+        instrument_key: str,
+        trading_date: str,
+        crossovers: list,
+    ):
+        """
+        Save recovered crossover events into compact daily format.
+
+        Prevents duplicate inserts by checking crossover timestamp already
+        stored in:
+
+        daily.<date>.crosses.timestamp
+        """
+
+        try:
+            if not crossovers:
+                return 0
+
+            UpstoxRepository.ensure_daily_document(
+                instrument_key=instrument_key,
+                trading_date=trading_date,
+            )
+
+            new_crossovers = []
+
+            for crossover in crossovers:
+                compact = UpstoxRepository._clean_crossover(crossover)
+
+                timestamp = compact.get("timestamp")
+
+                if not timestamp:
+                    continue
+
+                exists = UpstoxRepository.crossover_exists(
+                    instrument_key=instrument_key,
+                    trading_date=trading_date,
+                    timestamp=timestamp,
+                )
+
+                if not exists:
+                    new_crossovers.append(compact)
+
+            if not new_crossovers:
+                logger.info(
+                    f"No new recovered compact crossovers to save | {instrument_key}"
+                )
+                return 0
+
+            last_signal = new_crossovers[-1].get("signal", "NO_CROSSOVER")
+
+            result = MongoApp.get_live_ema_collection().update_one(
+                {"instrument_key": instrument_key},
+                {
+                    "$set": {
+                        f"daily.{trading_date}.status": last_signal,
+                        "last_updated": datetime.now(timezone.utc),
+                        "last_updated_date": trading_date,
+                    },
+                    "$push": {
+                        f"daily.{trading_date}.crosses": {
+                            "$each": new_crossovers,
+                        },
+                    },
+                    "$inc": {
+                        f"daily.{trading_date}.total_crosses": len(new_crossovers),
+                    },
+                },
+            )
+
+            UpstoxRepository._keep_last_5_daily_buckets(instrument_key)
+
+            logger.info(
+                f"Recovered compact crossovers saved | "
+                f"{instrument_key} | "
+                f"Inserted={len(new_crossovers)}"
+            )
+
+            return result
+
+        except Exception as ex:
+            logger.exception(
+                f"Failed saving recovered compact crossovers {instrument_key}: {ex}"
+            )
             return None
+
+    @staticmethod
+    def crossover_exists(
+        instrument_key: str,
+        trading_date: str,
+        timestamp: str,
+    ):
+        """
+        Check whether crossover already exists in compact format.
+
+        New path:
+
+        daily.<date>.crosses.timestamp
+        """
+
+        try:
+            doc = MongoApp.get_live_ema_collection().find_one(
+                {
+                    "instrument_key": instrument_key,
+                    f"daily.{trading_date}.crosses.timestamp": timestamp,
+                },
+                {"_id": 1},
+            )
+
+            return doc is not None
+
+        except Exception as ex:
+            logger.exception(f"Compact crossover lookup failed: {ex}")
+            return False
+
+    # =====================================================
+    # CURRENT DAY STATE
+    # =====================================================
 
     @staticmethod
     def get_current_day_state(
@@ -402,8 +738,17 @@ class UpstoxRepository:
         trading_date: str,
     ):
         """
-        Returns current day's EMA state and last processed candle timestamp.
+        Returns current compact daily state.
+
+        Expected return:
+
+        {
+            "status": "NO_CROSSOVER",
+            "total_crosses": 0,
+            "crosses": []
+        }
         """
+
         try:
             doc = MongoApp.get_live_ema_collection().find_one(
                 {"instrument_key": instrument_key},
@@ -419,7 +764,7 @@ class UpstoxRepository:
             return doc.get("daily", {}).get(trading_date)
 
         except Exception as ex:
-            logger.exception(f"Failed loading day state {instrument_key}: {ex}")
+            logger.exception(f"Failed loading compact day state {instrument_key}: {ex}")
             return None
 
     @staticmethod
@@ -428,114 +773,20 @@ class UpstoxRepository:
         trading_date: str,
     ):
         """
-        Returns latest processed candle timestamp for the given instrument/date.
+        New compact Mongo format does not store candle_timestamp.
+
+        Returning None means intraday recovery will replay available
+        intraday candles from Upstox HistoryApi.
+
+        If you later add root runtime.last_candle_timestamp,
+        this method can read it from there.
         """
-        try:
-            state = UpstoxRepository.get_current_day_state(
-                instrument_key=instrument_key,
-                trading_date=trading_date,
-            )
 
-            if not state:
-                return None
+        return None
 
-            return state.get("candle_timestamp")
-
-        except Exception as ex:
-            logger.exception(f"Failed getting candle timestamp {instrument_key}: {ex}")
-            return None
-
-    @staticmethod
-    def save_recovered_crossovers(
-        instrument_key: str,
-        trading_date: str,
-        crossovers: list,
-    ):
-        """
-        Save recovered crossover events.
-
-        Prevents duplicate inserts by checking crossover timestamps
-        already stored in daily.<date>.crosses_today.
-        """
-        try:
-            if not crossovers:
-                return 0
-
-            new_crossovers = []
-
-            for crossover in crossovers:
-                timestamp = crossover.get("timestamp")
-
-                if not timestamp:
-                    continue
-
-                exists = UpstoxRepository.crossover_exists(
-                    instrument_key=instrument_key,
-                    trading_date=trading_date,
-                    timestamp=timestamp,
-                )
-
-                if not exists:
-                    new_crossovers.append(crossover)
-
-            if not new_crossovers:
-                logger.info(f"No new recovered crossovers to save | {instrument_key}")
-                return 0
-
-            result = MongoApp.get_live_ema_collection().update_one(
-                {"instrument_key": instrument_key},
-                {
-                    "$set": {
-                        "last_updated": datetime.now(timezone.utc),
-                        "last_updated_date": trading_date,
-                        "latest_crosses_date": trading_date,
-                    },
-                    "$push": {
-                        f"daily.{trading_date}.crosses_today": {
-                            "$each": new_crossovers
-                        },
-                        "latest_crosses": {"$each": new_crossovers},
-                    },
-                },
-            )
-
-            logger.info(
-                f"Recovered crossovers saved | "
-                f"{instrument_key} | "
-                f"Inserted={len(new_crossovers)}"
-            )
-
-            return result
-
-        except Exception as ex:
-            logger.exception(
-                f"Failed saving recovered crossovers {instrument_key}: {ex}"
-            )
-            return None
-
-    @staticmethod
-    def crossover_exists(
-        instrument_key: str,
-        trading_date: str,
-        timestamp: str,
-    ):
-        """
-        Check whether crossover already exists for the given timestamp.
-        """
-        try:
-            doc = MongoApp.get_live_ema_collection().find_one(
-                {
-                    "instrument_key": instrument_key,
-                    f"daily.{trading_date}.crosses_today.timestamp": timestamp,
-                },
-                {"_id": 1},
-            )
-
-            return doc is not None
-
-        except Exception as ex:
-            logger.exception(f"Crossover lookup failed: {ex}")
-            return False
+    # =====================================================
+    # RECOVERED EMA STATE - NO EMA PERSISTENCE
+    # =====================================================
 
     @staticmethod
     def update_recovered_ema_state(
@@ -548,22 +799,26 @@ class UpstoxRepository:
         candle_timestamp: str,
     ):
         """
-        Save recovered EMA state after startup intraday recovery.
+        EMA values are no longer persisted in MongoDB.
 
-        relation should normally be:
-        - ABOVE
-        - BELOW
+        This method only:
+        - ensures today's compact daily bucket exists
+        - updates last_updated
+        - updates last_updated_date
+
+        Runtime EMA values remain in memory.
         """
+
         try:
+            UpstoxRepository.ensure_daily_document(
+                instrument_key=instrument_key,
+                trading_date=trading_date,
+            )
+
             result = MongoApp.get_live_ema_collection().update_one(
                 {"instrument_key": instrument_key},
                 {
                     "$set": {
-                        f"daily.{trading_date}.signal_status": relation,
-                        f"daily.{trading_date}.ema_short": ema_short,
-                        f"daily.{trading_date}.ema_long": ema_long,
-                        f"daily.{trading_date}.last_price": last_price,
-                        f"daily.{trading_date}.candle_timestamp": candle_timestamp,
                         "last_updated": datetime.now(timezone.utc),
                         "last_updated_date": trading_date,
                     }
@@ -571,22 +826,41 @@ class UpstoxRepository:
             )
 
             logger.info(
-                f"Recovered EMA state saved | "
-                f"{instrument_key} | "
-                f"Date={trading_date} | "
-                f"EMA9={ema_short:.6f} | "
-                f"EMA21={ema_long:.6f} | "
+                f"Recovered EMA runtime processed without Mongo EMA persistence | "
+                f"{instrument_key} | Date={trading_date} | "
+                f"EMA9={ema_short:.6f} | EMA21={ema_long:.6f} | "
                 f"Relation={relation}"
             )
-
-            if result.modified_count == 0:
-                logger.warning(
-                    f"Recovered EMA update did not modify document | "
-                    f"{instrument_key} | Date={trading_date}"
-                )
 
             return result
 
         except Exception as ex:
-            logger.exception(f"Failed saving recovered EMA {instrument_key}: {ex}")
+            logger.exception(
+                f"Failed updating recovered compact metadata {instrument_key}: {ex}"
+            )
+            return None
+
+    # =====================================================
+    # LAST UPDATED
+    # =====================================================
+
+    @staticmethod
+    def update_last_updated(instrument_key: str):
+        """
+        Update root document last_updated timestamp.
+        """
+        try:
+            result = MongoApp.get_live_ema_collection().update_one(
+                {"instrument_key": instrument_key},
+                {
+                    "$set": {
+                        "last_updated": datetime.now(timezone.utc),
+                    }
+                },
+            )
+
+            return result
+
+        except Exception as ex:
+            logger.exception(f"Failed updating last_updated {instrument_key}: {ex}")
             return None

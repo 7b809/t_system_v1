@@ -20,6 +20,8 @@ from services.dashboard_state import DashboardState
 from services.market_scheduler import MarketScheduler
 from services.preload_service import PreloadService
 from services.telegram_service import TelegramNotificationService
+from contextlib import asynccontextmanager
+
 
 logger = get_logger(__name__)
 
@@ -27,10 +29,22 @@ logger = get_logger(__name__)
 # FASTAPI APPLICATION
 # =====================================================
 
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    logger.info("FastAPI startup event triggered.")
+    application.start_background()
+
+    yield
+
+    logger.info("FastAPI shutdown event triggered.")
+    application.shutdown()
+
 app = FastAPI(
     title=Settings.APP_NAME,
     version=Settings.APP_VERSION,
     description="UPSTOX EMA Crossover Engine Dashboard",
+    lifespan=lifespan,
 )
 
 # Ensure required folders exist.
@@ -329,29 +343,7 @@ application = Application()
 # =====================================================
 
 
-@app.on_event("startup")
-async def on_startup():
-    """
-    FastAPI startup event.
 
-    Starts the trading scheduler in the background while FastAPI
-    serves the dashboard.
-    """
-
-    logger.info("FastAPI startup event triggered.")
-
-    application.start_background()
-
-
-@app.on_event("shutdown")
-async def on_shutdown():
-    """
-    FastAPI shutdown event.
-    """
-
-    logger.info("FastAPI shutdown event triggered.")
-
-    application.shutdown()
 
 
 # =====================================================

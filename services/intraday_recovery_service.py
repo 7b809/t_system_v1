@@ -14,18 +14,30 @@ logger = get_logger(__name__)
 
 class IntradayRecoveryService:
     """
-    Rebuilds runtime EMA state using today's missing
-    intraday candles from Upstox.
+    Rebuilds runtime EMA state using today's intraday candles from Upstox.
 
-    Used when application starts/restarts during market hours.
+    Used when application starts or restarts during market hours.
 
-    Recovery logic:
+    New compact MongoDB behavior:
 
-    Mongo Snapshot EMA State
-            +
-    Missing Intraday Candles after last processed candle
-            =
-    Recovered Latest EMA State
+    MongoDB saves only:
+
+    daily.<date>.status
+    daily.<date>.total_crosses
+    daily.<date>.crosses
+    last_updated
+    last_updated_date
+
+    MongoDB does NOT save:
+
+    candles
+    today_candles
+    ema_short
+    ema_long
+    last_price
+    candle_timestamp
+    latest_crosses
+    crosses_today
 
     Important:
     Intraday candle fetching uses Upstox HistoryApi directly.
@@ -63,14 +75,13 @@ class IntradayRecoveryService:
     @classmethod
     def _extract_candles_from_response(cls, response):
         """
-        Convert Upstox intraday candle response into
-        candle dictionary format used by EMA engine.
+        Convert Upstox intraday candle response into candle dictionary format.
 
         Output:
 
         [
             {
-                "timestamp": "...",
+                "timestamp": "2026-07-21T09:15:00+05:30",
                 "open": 100.0,
                 "high": 101.0,
                 "low": 99.0,
@@ -180,7 +191,12 @@ class IntradayRecoveryService:
         """
         Keep only candles newer than the last processed candle.
 
-        If last_processed_timestamp is None, returns all candles.
+        In compact Mongo format, candle_timestamp is not persisted.
+        So repository currently returns None and this method replays all
+        available intraday candles.
+
+        If later you add root runtime.last_candle_timestamp, this method
+        can again replay only missing candles.
         """
 
         try:
@@ -213,16 +229,24 @@ class IntradayRecoveryService:
         """
         Recover EMA state for one instrument.
 
-        Correct recovery flow:
+        Compact recovery flow:
 
-        1. Start from Mongo snapshot EMA state.
+        1. Start from base runtime EMA state.
         2. Fetch today's intraday candles from Upstox HistoryApi.
-        3. Read last processed candle timestamp from Mongo.
-        4. Replay only candles after that timestamp.
+        3. Since compact Mongo does not store candle_timestamp, replay all
+           available intraday candles unless repository later provides a timestamp.
+        4. Recalculate EMA9 and EMA21 in memory.
         5. Detect recovered crossovers.
-        6. Persist recovered EMA state.
-        7. Persist recovered crossovers.
-        8. Return latest EMA state for runtime memory.
+        6. Persist only compact crossover data to MongoDB.
+        7. Return latest EMA state for runtime memory.
+
+        MongoDB will only persist:
+
+        daily.<date>.status
+        daily.<date>.total_crosses
+        daily.<date>.crosses
+        last_updated
+        last_updated_date
 
         Access token is not required for intraday candle recovery.
         """
@@ -236,6 +260,17 @@ class IntradayRecoveryService:
 
             trading_date = cls._get_trading_date()
 
+            # --------------------------------------------------
+            # Ensure compact daily document exists
+            # --------------------------------------------------
+            UpstoxRepository.ensure_daily_document(
+                instrument_key=instrument_key,
+                trading_date=trading_date,
+            )
+
+            # --------------------------------------------------
+            # Fetch today's intraday candles
+            # --------------------------------------------------
             candles = cls.fetch_intraday_candles(
                 instrument_key=instrument_key,
             )
@@ -244,6 +279,10 @@ class IntradayRecoveryService:
                 logger.warning(f"No intraday candles available for {instrument_key}")
                 return None
 
+            # --------------------------------------------------
+            # Compact Mongo currently does not save candle_timestamp.
+            # Repository returns None, so this replays all candles.
+            # --------------------------------------------------
             last_processed_timestamp = UpstoxRepository.get_last_processed_timestamp(
                 instrument_key=instrument_key,
                 trading_date=trading_date,
@@ -277,9 +316,8 @@ class IntradayRecoveryService:
                 }
 
             # --------------------------------------------------
-            # Start from Mongo snapshot state
+            # Start from base runtime EMA state
             # --------------------------------------------------
-
             ema_short = float(base_state.get("ema_short", 0.0))
             ema_long = float(base_state.get("ema_long", 0.0))
 
@@ -293,9 +331,8 @@ class IntradayRecoveryService:
             recovered_crossovers = []
 
             # --------------------------------------------------
-            # Replay only missing candles
+            # Replay intraday candles and detect recovered crosses
             # --------------------------------------------------
-
             for candle in missing_candles:
                 try:
                     close_price = float(candle["close"])
@@ -319,6 +356,8 @@ class IntradayRecoveryService:
                     )
 
                     if signal:
+                        # Keep EMA values here for logs/runtime/debug.
+                        # Repository will store only timestamp, signal, price.
                         recovered_crossovers.append(
                             {
                                 "timestamp": candle["timestamp"],
@@ -358,9 +397,9 @@ class IntradayRecoveryService:
             }
 
             # --------------------------------------------------
-            # Persist recovered EMA state
+            # Update compact document metadata only.
+            # EMA values are not persisted in compact Mongo format.
             # --------------------------------------------------
-
             UpstoxRepository.update_recovered_ema_state(
                 instrument_key=instrument_key,
                 trading_date=trading_date,
@@ -372,10 +411,17 @@ class IntradayRecoveryService:
             )
 
             # --------------------------------------------------
-            # Persist recovered crossovers
+            # Save recovered crossovers in compact format.
+            #
+            # Repository stores only:
+            # {
+            #   "timestamp": "...",
+            #   "signal": "BULLISH/BEARISH",
+            #   "price": 121.40
+            # }
+            #
             # Duplicate protection is handled in repository.
             # --------------------------------------------------
-
             UpstoxRepository.save_recovered_crossovers(
                 instrument_key=instrument_key,
                 trading_date=trading_date,
@@ -393,10 +439,11 @@ class IntradayRecoveryService:
                 f"Recovery complete | "
                 f"{instrument_key} | "
                 f"FetchedCandles={len(candles)} | "
-                f"MissingCandles={len(missing_candles)} | "
+                f"ReplayedCandles={len(missing_candles)} | "
                 f"RecoveredCrosses={len(recovered_crossovers)} | "
                 f"EMA9={ema_short:.6f} | "
-                f"EMA21={ema_long:.6f}"
+                f"EMA21={ema_long:.6f} | "
+                f"Relation={relation}"
             )
 
             return result

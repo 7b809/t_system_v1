@@ -44,25 +44,25 @@ class Settings:
     # EMA SETTINGS
     # =====================================================
 
-    EMA_SHORT_PERIOD = int(os.getenv("EMA_SHORT_PERIOD", 9))
+    EMA_SHORT_PERIOD =  9
 
-    EMA_LONG_PERIOD = int(os.getenv("EMA_LONG_PERIOD", 21))
+    EMA_LONG_PERIOD = 21
 
     # =====================================================
     # MARKET SCHEDULER
     # =====================================================
 
-    PRELOAD_HOUR = int(os.getenv("PRELOAD_HOUR", 9))
+    PRELOAD_HOUR =  9
 
-    PRELOAD_MINUTE = int(os.getenv("PRELOAD_MINUTE", 0))
+    PRELOAD_MINUTE =  0
 
-    MARKET_START_HOUR = int(os.getenv("MARKET_START_HOUR", 9))
+    MARKET_START_HOUR = 9
 
-    MARKET_START_MINUTE = int(os.getenv("MARKET_START_MINUTE", 15))
+    MARKET_START_MINUTE = 15
 
-    MARKET_END_HOUR = int(os.getenv("MARKET_END_HOUR", 15))
+    MARKET_END_HOUR = 15
 
-    MARKET_END_MINUTE = int(os.getenv("MARKET_END_MINUTE", 30))
+    MARKET_END_MINUTE = 30
 
     PRELOAD_TIME = time(
         PRELOAD_HOUR,
@@ -83,36 +83,18 @@ class Settings:
     # CANDLE SETTINGS
     # =====================================================
 
-    CANDLE_INTERVAL = os.getenv(
-        "CANDLE_INTERVAL",
-        "1minute",
-    )
+    CANDLE_INTERVAL = "1minute",
+    
 
     # =====================================================
     # INTRADAY RECOVERY SETTINGS
     # =====================================================
 
-    ENABLE_INTRADAY_RECOVERY = (
-        os.getenv(
-            "ENABLE_INTRADAY_RECOVERY",
-            "true",
-        )
-        .strip()
-        .lower()
-        == "true"
-    )
+    ENABLE_INTRADAY_RECOVERY =True
 
-    RECOVERY_INTERVAL = os.getenv(
-        "RECOVERY_INTERVAL",
-        CANDLE_INTERVAL,
-    )
+    RECOVERY_INTERVAL = CANDLE_INTERVAL
 
-    RECOVERY_MAX_WORKERS = int(
-        os.getenv(
-            "RECOVERY_MAX_WORKERS",
-            10,
-        )
-    )
+    RECOVERY_MAX_WORKERS =10
 
     # =====================================================
     # TELEGRAM SETTINGS
@@ -122,15 +104,7 @@ class Settings:
 
     TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 
-    TELE_FLAG = (
-        os.getenv(
-            "TELE_FLAG",
-            "true",
-        )
-        .strip()
-        .lower()
-        == "true"
-    )
+    TELE_FLAG = True
 
     # =====================================================
     # WEBSOCKET SETTINGS
@@ -205,17 +179,6 @@ class Settings:
         )
     )
 
-    # Optional.
-    # Use this only if you subscribe NIFTY index feed along with option strikes.
-    #
-    # Example .env:
-    # NIFTY_INDEX_INSTRUMENT_KEY=NSE_INDEX|Nifty 50
-    #
-    # If blank, dashboard will still work, but NIFTY header will show "--".
-    NIFTY_INDEX_INSTRUMENT_KEY = os.getenv(
-        "NIFTY_INDEX_INSTRUMENT_KEY",
-        "",
-    )
 
     # =====================================================
     # SCHEDULER SETTINGS
@@ -252,7 +215,7 @@ class Settings:
     STORE_TODAY_CANDLES = (
         os.getenv(
             "STORE_TODAY_CANDLES",
-            "true",
+            "false",
         )
         .strip()
         .lower()
@@ -262,12 +225,14 @@ class Settings:
     STORE_MASTER_CANDLES = (
         os.getenv(
             "STORE_MASTER_CANDLES",
-            "true",
+            "false",
         )
         .strip()
         .lower()
         == "true"
     )
+
+
 
     # =====================================================
     # LOGGING

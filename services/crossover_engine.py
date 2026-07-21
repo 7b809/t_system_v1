@@ -17,7 +17,13 @@ class CrossoverEngine:
     def get_trading_date(candle_timestamp: str) -> str:
         """
         Extract trading date from candle timestamp.
+
+        Example:
+        2026-07-21T09:15:00+05:30
+        ->
+        2026-07-21
         """
+
         try:
             return datetime.fromisoformat(candle_timestamp).date().isoformat()
 
@@ -33,17 +39,30 @@ class CrossoverEngine:
     @classmethod
     def process_completed_candle(cls, instrument_key: str, candle: dict):
         """
-        Process a completed 1-minute candle.
+        Process one completed 1-minute candle.
 
-        Flow:
-        1. Load runtime state.
-        2. Calculate live EMA9 and EMA21.
-        3. Detect crossover.
-        4. Save candle.
-        5. Update runtime memory.
-        6. Persist EMA state to Mongo.
-        7. Update dashboard.
-        8. Save crossover if detected.
+        New compact Mongo save behavior:
+
+        MongoDB will save only:
+
+        daily.<date>.status
+        daily.<date>.total_crosses
+        daily.<date>.crosses
+        last_updated
+        last_updated_date
+
+        MongoDB will NOT save:
+
+        candles
+        today_candles
+        ema_short
+        ema_long
+        last_price
+        candle_timestamp
+        latest_crosses
+        crosses_today
+
+        Runtime and dashboard still keep EMA values in memory.
         """
 
         try:
@@ -58,14 +77,28 @@ class CrossoverEngine:
 
                 return
 
+            # --------------------------------------------------
+            # Validate candle
+            # --------------------------------------------------
+            if not candle:
+                logger.warning(f"Empty candle received | {instrument_key}")
+                return
+
+            if "close" not in candle or "timestamp" not in candle:
+                logger.warning(
+                    f"Invalid candle received | {instrument_key} | {candle}"
+                )
+                return
+
             close_price = float(candle["close"])
+
             prev_ema_short = float(state.ema_short)
             prev_ema_long = float(state.ema_long)
             prev_relation = state.relation
 
-            # ----------------------------------
+            # --------------------------------------------------
             # EMA Calculation
-            # ----------------------------------
+            # --------------------------------------------------
             ema_short = EMAIndicator.calculate_live_ema(
                 current_price=close_price,
                 previous_ema=prev_ema_short,
@@ -78,9 +111,9 @@ class CrossoverEngine:
                 period=Settings.EMA_LONG_PERIOD,
             )
 
-            # ----------------------------------
+            # --------------------------------------------------
             # Crossover Detection
-            # ----------------------------------
+            # --------------------------------------------------
             signal, relation = EMAIndicator.detect_crossover(
                 previous_relation=prev_relation,
                 ema_short=ema_short,
@@ -89,19 +122,21 @@ class CrossoverEngine:
 
             trading_date = cls.get_trading_date(candle["timestamp"])
 
-            # ----------------------------------
-            # Save Candle
-            # ----------------------------------
-            if Settings.STORE_MASTER_CANDLES:
-                UpstoxRepository.append_candle(
-                    instrument_key=instrument_key,
-                    candle=candle,
-                    trading_date=trading_date,
-                )
+            # --------------------------------------------------
+            # IMPORTANT:
+            # Candle storage removed for compact Mongo format.
+            #
+            # Old behavior:
+            # - saved root candles
+            # - saved daily.<date>.today_candles
+            #
+            # New behavior:
+            # - do not save candle data to MongoDB
+            # --------------------------------------------------
 
-            # ----------------------------------
-            # Update Runtime
-            # ----------------------------------
+            # --------------------------------------------------
+            # Update Runtime EMA State
+            # --------------------------------------------------
             state.update_ema(
                 ema_short=ema_short,
                 ema_long=ema_long,
@@ -109,14 +144,32 @@ class CrossoverEngine:
                 relation=relation,
             )
 
-            # ----------------------------------
+            # --------------------------------------------------
             # Signal Status
-            # ----------------------------------
+            #
+            # If crossover happened:
+            #   BULLISH / BEARISH
+            #
+            # If no crossover on this candle:
+            #   NO_CROSSOVER
+            #
+            # This value is saved to:
+            # daily.<date>.status
+            # --------------------------------------------------
             signal_status = signal if signal else "NO_CROSSOVER"
 
-            # ----------------------------------
-            # Update Daily Status in Mongo
-            # ----------------------------------
+            # --------------------------------------------------
+            # Update Compact Daily Status in Mongo
+            #
+            # Repository will save only:
+            # daily.<date>.status
+            # last_updated
+            # last_updated_date
+            #
+            # ema_short, ema_long, last_price, candle_timestamp
+            # are passed only for method compatibility.
+            # Repository will ignore them.
+            # --------------------------------------------------
             UpstoxRepository.update_live_ema_status(
                 instrument_key=instrument_key,
                 trading_date=trading_date,
@@ -127,9 +180,13 @@ class CrossoverEngine:
                 candle_timestamp=candle["timestamp"],
             )
 
-            # ----------------------------------
-            # Dashboard EMA / Candle State Update
-            # ----------------------------------
+            # --------------------------------------------------
+            # Update Dashboard EMA State
+            #
+            # Dashboard still needs EMA values, relation,
+            # last close, and candle time.
+            # These are kept in memory only.
+            # --------------------------------------------------
             DashboardState.update_ema_state(
                 instrument_key=instrument_key,
                 ema_short=ema_short,
@@ -144,9 +201,20 @@ class CrossoverEngine:
                 CandleBuilder.get_total_active_candles()
             )
 
-            # ----------------------------------
-            # Save Crossover
-            # ----------------------------------
+            # --------------------------------------------------
+            # Save Crossover If Detected
+            #
+            # Internal crossover object includes EMA values because
+            # dashboard latest_crossovers uses them.
+            #
+            # Repository will store only compact Mongo format:
+            #
+            # {
+            #   "timestamp": "...",
+            #   "signal": "BULLISH",
+            #   "price": 121.40
+            # }
+            # --------------------------------------------------
             if signal and Settings.STORE_CROSSES:
 
                 crossover = {
@@ -167,9 +235,9 @@ class CrossoverEngine:
                     crossover_data=crossover,
                 )
 
-                # ----------------------------------
-                # Dashboard Crossover Update
-                # ----------------------------------
+                # --------------------------------------------------
+                # Dashboard Latest Crossover Update
+                # --------------------------------------------------
                 DashboardState.add_crossover(
                     instrument_key=instrument_key,
                     trading_date=trading_date,
@@ -188,6 +256,9 @@ class CrossoverEngine:
                     f"EMA21={ema_long:.2f}"
                 )
 
+            # --------------------------------------------------
+            # Update root last_updated only
+            # --------------------------------------------------
             UpstoxRepository.update_last_updated(instrument_key)
 
         except Exception as ex:
@@ -198,7 +269,14 @@ class CrossoverEngine:
     @classmethod
     def process_batch(cls, closed_candles: list):
         """
-        Process multiple candles.
+        Process multiple completed candles.
+
+        closed_candles format:
+
+        [
+            (instrument_key, candle),
+            (instrument_key, candle)
+        ]
         """
 
         try:
@@ -211,8 +289,8 @@ class CrossoverEngine:
 
                 try:
                     cls.process_completed_candle(
-                        instrument_key,
-                        candle,
+                        instrument_key=instrument_key,
+                        candle=candle,
                     )
 
                     processed += 1
@@ -240,7 +318,15 @@ class CrossoverEngine:
     @classmethod
     def flush_pending_candles(cls):
         """
-        Flush all active candles before websocket shutdown.
+        Flush all currently active candles.
+
+        Used during:
+        - websocket shutdown
+        - market close cleanup
+        - application shutdown
+
+        This still processes the final candle for EMA/crossover detection,
+        but does not store candle data in MongoDB.
         """
 
         try:
@@ -259,8 +345,8 @@ class CrossoverEngine:
 
                     if candle:
                         cls.process_completed_candle(
-                            instrument_key,
-                            candle,
+                            instrument_key=instrument_key,
+                            candle=candle,
                         )
 
                 except Exception as ex:
@@ -284,7 +370,9 @@ class CrossoverEngine:
     @classmethod
     def get_signal_summary(cls, instrument_key: str):
         """
-        Get runtime signal summary.
+        Get runtime signal summary for one instrument.
+
+        This reads from in-memory PreloadService.RUNTIME_STATE.
         """
 
         try:
@@ -316,7 +404,7 @@ class CrossoverEngine:
     @classmethod
     def print_runtime_stats(cls):
         """
-        Runtime monitoring stats.
+        Print runtime EMA engine stats.
         """
 
         try:
