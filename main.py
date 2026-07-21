@@ -157,9 +157,9 @@ class Application:
 
         DashboardState.update_scheduler_status("MONGODB_CONNECTED")
 
-        current_date = datetime.now(ZoneInfo(Settings.TIMEZONE)).strftime(
-            "%Y-%m-%d %H:%M:%S"
-        )
+        from core.datetime_utils import now
+
+        current_date = now().strftime("%Y-%m-%d %H:%M:%S")
 
         self.notifier.send_app_started(date_str=current_date)
 

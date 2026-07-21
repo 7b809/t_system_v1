@@ -8,6 +8,7 @@ from config.settings import Settings
 from core.logger import get_logger
 from db.repositories import UpstoxRepository
 from indicators.ema import EMAIndicator
+from core.datetime_utils import now
 
 logger = get_logger(__name__)
 
@@ -180,7 +181,7 @@ class IntradayRecoveryService:
         Current trading date using configured timezone.
         """
 
-        return datetime.now(ZoneInfo(Settings.TIMEZONE)).date().isoformat()
+        return now().date().isoformat()
 
     @classmethod
     def _filter_missing_candles(
@@ -476,7 +477,7 @@ class IntradayRecoveryService:
             if not recovery_enabled:
                 return False
 
-            now = datetime.now(ZoneInfo(Settings.TIMEZONE)).time()
+            now = now().time()
 
             return Settings.MARKET_START_TIME <= now < Settings.MARKET_END_TIME
 

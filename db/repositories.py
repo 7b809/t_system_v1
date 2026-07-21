@@ -4,6 +4,7 @@ import threading
 from db.mongo_app import MongoApp
 from core.logger import get_logger
 from config.settings import Settings
+from core.datetime_utils import utc_now
 
 SHOW_LOGS = Settings.SHOW_LOGS_FLAG
 
@@ -41,7 +42,7 @@ class UpstoxRepository:
                 raise Exception("Access token is empty.")
 
             cls._ACCESS_TOKEN = access_token
-            cls._LAST_REFRESH = datetime.now(timezone.utc)
+            cls._LAST_REFRESH = utc_now()
 
             logger.info("Access token refreshed successfully.")
 
@@ -59,7 +60,7 @@ class UpstoxRepository:
         it is refreshed from MongoDB automatically.
         """
         with cls._LOCK:
-            now = datetime.now(timezone.utc)
+            now = utc_now()
 
             if (
                 cls._ACCESS_TOKEN is None
@@ -369,7 +370,7 @@ class UpstoxRepository:
                         }
                     },
                     "last_updated_date": trading_date,
-                    "last_updated": datetime.now(timezone.utc),
+                    "last_updated": utc_now(),
                 }
 
                 MongoApp.get_live_ema_collection().insert_one(compact_doc)
@@ -403,7 +404,7 @@ class UpstoxRepository:
                             "total_crosses": 0,
                             "crosses": [],
                         },
-                        "last_updated": datetime.now(timezone.utc),
+                        "last_updated": utc_now(),
                         "last_updated_date": trading_date,
                     }
                 },
@@ -466,7 +467,7 @@ class UpstoxRepository:
                 {
                     "$set": {
                         f"daily.{trading_date}.status": compact_status,
-                        "last_updated": datetime.now(timezone.utc),
+                        "last_updated": utc_now(),
                         "last_updated_date": trading_date,
                     }
                 },
@@ -583,7 +584,7 @@ class UpstoxRepository:
                     "$set": {
                         "strike": strike,
                         f"daily.{trading_date}.status": signal,
-                        "last_updated": datetime.now(timezone.utc),
+                        "last_updated": utc_now(),
                         "last_updated_date": trading_date,
                     },
                     "$push": {
@@ -669,7 +670,7 @@ class UpstoxRepository:
                 {
                     "$set": {
                         f"daily.{trading_date}.status": last_signal,
-                        "last_updated": datetime.now(timezone.utc),
+                        "last_updated": utc_now(),
                         "last_updated_date": trading_date,
                     },
                     "$push": {
@@ -819,7 +820,7 @@ class UpstoxRepository:
                 {"instrument_key": instrument_key},
                 {
                     "$set": {
-                        "last_updated": datetime.now(timezone.utc),
+                        "last_updated": utc_now(),
                         "last_updated_date": trading_date,
                     }
                 },
@@ -854,7 +855,7 @@ class UpstoxRepository:
                 {"instrument_key": instrument_key},
                 {
                     "$set": {
-                        "last_updated": datetime.now(timezone.utc),
+                        "last_updated": utc_now(),
                     }
                 },
             )

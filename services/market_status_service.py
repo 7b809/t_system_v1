@@ -6,6 +6,7 @@ from upstox_client.rest import ApiException
 
 from config.settings import Settings
 from core.logger import get_logger
+from core.datetime_utils import now
 
 logger = get_logger(__name__)
 
@@ -61,7 +62,7 @@ class MarketStatusService:
 
         try:
 
-            today = datetime.now(ZoneInfo(Settings.TIMEZONE)).date().isoformat()
+            today = now().date().isoformat()
 
             response = cls.get_market_status(today)
 

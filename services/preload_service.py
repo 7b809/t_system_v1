@@ -8,6 +8,7 @@ from db.repositories import UpstoxRepository
 from models.strike_state import StrikeState
 from services.intraday_recovery_service import IntradayRecoveryService
 from services.dashboard_state import DashboardState
+from core.datetime_utils import now
 
 logger = get_logger(__name__)
 
@@ -66,7 +67,7 @@ class PreloadService:
             if not recovery_enabled:
                 return False
 
-            now = datetime.now(ZoneInfo(Settings.TIMEZONE)).time()
+            now = now().time()
 
             return Settings.MARKET_START_TIME <= now < Settings.MARKET_END_TIME
 
@@ -114,7 +115,7 @@ class PreloadService:
         Current trading date using configured timezone.
         """
 
-        return datetime.now(ZoneInfo(Settings.TIMEZONE)).date().isoformat()
+        return now().date().isoformat()
 
     @classmethod
     def reset(cls):

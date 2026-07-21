@@ -4,6 +4,8 @@ from zoneinfo import ZoneInfo
 
 from config.settings import Settings
 from core.logger import get_logger
+from core.datetime_utils import now
+
 
 logger = get_logger(__name__)
 
@@ -106,7 +108,7 @@ class DashboardState:
         Current datetime string using configured timezone.
         """
         try:
-            return datetime.now(ZoneInfo(Settings.TIMEZONE)).isoformat()
+            return now().isoformat()
         except Exception:
             return datetime.now().isoformat()
 
