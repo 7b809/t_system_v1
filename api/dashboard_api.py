@@ -1,10 +1,13 @@
 import json
+from pathlib import Path
+from datetime import datetime
 
 from fastapi import APIRouter, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.templating import Jinja2Templates
 
 from core.logger import get_logger
+from core.datetime_utils import now
 from services.dashboard_state import DashboardState
 from services.websocket_manager import WebSocketManager
 
@@ -28,7 +31,6 @@ async def dashboard_home(request: Request):
     New behavior:
     - Frontend can also connect to /ws/ltp for live LTP updates.
     """
-
     try:
         return templates.TemplateResponse(
             request=request,
@@ -73,7 +75,6 @@ async def get_dashboard_snapshot():
     - all subscribed instrument states
     - recent crossovers
     """
-
     try:
         snapshot = DashboardState.get_snapshot()
 
@@ -104,7 +105,6 @@ async def dashboard_health():
     - deployment platform health checks
     - quick dashboard availability validation
     """
-
     try:
         snapshot = DashboardState.get_snapshot()
 
@@ -151,7 +151,6 @@ async def get_socket_clients():
     - How many browser clients are connected
     - What strike/type each client subscribed to
     """
-
     try:
         return JSONResponse(
             content={
@@ -215,7 +214,6 @@ async def websocket_ltp(websocket: WebSocket):
             "timestamp": "2026-07-20T09:15:00+05:30"
         }
     """
-
     await WebSocketManager.connect(websocket)
 
     try:
@@ -288,3 +286,66 @@ async def websocket_ltp(websocket: WebSocket):
     except Exception as ex:
         WebSocketManager.disconnect(websocket)
         logger.exception(f"Frontend WebSocket connection failed: {ex}")
+
+
+# =====================================================
+# NEW: JSON crossover file endpoint
+# =====================================================
+
+
+@router.get("/api/crossovers")
+@router.get("/api/crossovers/{date}")
+async def get_crossovers(date: str | None = None):
+    """
+    Return the local JSON crossover data for a given trading date.
+
+    If no date is provided, uses today's date.
+    File is expected at: data/crossovers/YYYY-MM-DD.json
+
+    Returns:
+        JSON object mapping instrument_key to its crossover data.
+        Returns empty object if file does not exist.
+    """
+    try:
+        # Determine date
+        if date is None:
+            date = now().date().isoformat()
+        else:
+            # Validate format (basic)
+            try:
+                datetime.strptime(date, "%Y-%m-%d")
+            except ValueError:
+                return JSONResponse(
+                    content={"error": "Invalid date format. Use YYYY-MM-DD."},
+                    status_code=400,
+                )
+
+        file_path = Path("data/crossovers") / f"{date}.json"
+
+        if not file_path.exists():
+            logger.warning(f"Crossover file not found: {file_path}")
+            return JSONResponse(
+                content={},
+                status_code=200,
+            )
+
+        with open(file_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+
+        return JSONResponse(
+            content=data,
+            status_code=200,
+        )
+
+    except json.JSONDecodeError:
+        logger.exception(f"Malformed JSON in crossover file: {file_path}")
+        return JSONResponse(
+            content={"error": "Crossover data corrupted."},
+            status_code=500,
+        )
+    except Exception as ex:
+        logger.exception(f"Error serving crossover file: {ex}")
+        return JSONResponse(
+            content={"error": "Internal server error."},
+            status_code=500,
+        )

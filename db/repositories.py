@@ -1,5 +1,9 @@
 from datetime import datetime, timezone
 import threading
+import json
+import os
+import tempfile
+from pathlib import Path
 
 from db.mongo_app import MongoApp
 from core.logger import get_logger
@@ -17,6 +21,10 @@ class UpstoxRepository:
     _LAST_REFRESH = None
     _REFRESH_INTERVAL = 300  # seconds
     _LOCK = threading.RLock()
+
+    # --- JSON persistence ---
+    _JSON_LOCK = threading.RLock()
+    _JSON_DIR = Path("data/crossovers")
 
     # =====================================================
     # ACCESS TOKEN METHODS
@@ -252,9 +260,7 @@ class UpstoxRepository:
                 )
 
         except Exception as ex:
-            logger.exception(
-                f"Failed pruning old daily buckets {instrument_key}: {ex}"
-            )
+            logger.exception(f"Failed pruning old daily buckets {instrument_key}: {ex}")
 
     @staticmethod
     def _get_compact_status(signal_status: str | None) -> str:
@@ -286,6 +292,176 @@ class UpstoxRepository:
 
         except Exception:
             return "NO_CROSSOVER"
+
+    # =====================================================
+    # JSON PERSISTENCE HELPERS
+    # =====================================================
+
+    @classmethod
+    def _ensure_json_dir(cls) -> None:
+        """Create the JSON storage directory if it doesn't exist."""
+        try:
+            cls._JSON_DIR.mkdir(parents=True, exist_ok=True)
+        except Exception as ex:
+            logger.exception(f"Failed to create JSON directory: {ex}")
+            raise
+
+    @classmethod
+    def _get_json_path(cls, trading_date: str) -> Path:
+        """Return the file path for a given trading date."""
+        return cls._JSON_DIR / f"{trading_date}.json"
+
+    @classmethod
+    def _read_json_file(cls, trading_date: str) -> dict:
+        """
+        Read the JSON file for the given date.
+        Returns a dict mapping instrument_key to its data.
+        If file doesn't exist or is malformed, returns empty dict.
+        """
+        file_path = cls._get_json_path(trading_date)
+        if not file_path.exists():
+            return {}
+
+        try:
+            with open(file_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                if isinstance(data, dict):
+                    return data
+                else:
+                    logger.warning(
+                        f"JSON file {file_path} does not contain a dict; resetting."
+                    )
+                    return {}
+        except json.JSONDecodeError:
+            logger.warning(f"JSON file {file_path} is malformed; resetting.")
+            return {}
+        except Exception as ex:
+            logger.exception(f"Error reading JSON file {file_path}: {ex}")
+            return {}
+
+    @classmethod
+    def _write_json_atomic(cls, trading_date: str, data: dict) -> None:
+        """
+        Write the data to the JSON file atomically (using a temporary file).
+        Thread-safe via class-level lock.
+        """
+        with cls._JSON_LOCK:
+            cls._ensure_json_dir()
+            file_path = cls._get_json_path(trading_date)
+
+            # Write to a temporary file in the same directory
+            temp_file = tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                dir=str(file_path.parent),
+                prefix=f".{file_path.name}.tmp",
+                delete=False,
+            )
+
+            try:
+                json.dump(data, temp_file, indent=2, default=str)
+                temp_file.flush()
+                os.fsync(temp_file.fileno())
+                temp_file.close()
+
+                # Atomic replace
+                os.replace(temp_file.name, file_path)
+
+                # Log when a new file is created (i.e., it didn't exist before)
+                if not file_path.exists():
+                    logger.info(f"JSON crossover file created: {file_path}")
+
+            except Exception as ex:
+                # Clean up the temp file if something goes wrong
+                try:
+                    os.unlink(temp_file.name)
+                except Exception:
+                    pass
+                logger.exception(f"Failed to write JSON file {file_path}: {ex}")
+                raise
+
+    @classmethod
+    def _update_json_crossover(
+        cls,
+        instrument_key: str,
+        trading_date: str,
+        crossover: dict,
+    ) -> None:
+        """
+        Update the JSON file with a new crossover for the given instrument.
+        This method reads the current file, updates the instrument's data,
+        and writes back atomically.
+        """
+        with cls._JSON_LOCK:
+            data = cls._read_json_file(trading_date)
+
+            # If the instrument is not yet in the file, create a new entry.
+            if instrument_key not in data:
+                # Fetch master strike document to get details.
+                master_doc = cls.get_strike_by_instrument_key(instrument_key)
+                if not master_doc:
+                    logger.error(
+                        f"Cannot add instrument {instrument_key} to JSON: master strike not found."
+                    )
+                    return
+
+                new_entry = {
+                    "instrument_key": master_doc.get("instrument_key"),
+                    "trading_symbol": master_doc.get("trading_symbol", ""),
+                    "strike": master_doc.get("strike"),
+                    "type": master_doc.get("type"),  # CE/PE
+                    "status": "NO_CROSSOVER",
+                    "total_crosses": 0,
+                    "crossovers": [],
+                    "last_updated": utc_now().isoformat(),
+                }
+                data[instrument_key] = new_entry
+                logger.info(
+                    f"Added new instrument to JSON crossover file: {instrument_key}"
+                )
+
+            # Get the entry and update it.
+            entry = data[instrument_key]
+
+            # Append the new crossover (use compact format).
+            compact_crossover = cls._clean_crossover(crossover)
+            if not compact_crossover:
+                logger.warning(
+                    f"Empty crossover not saved to JSON for {instrument_key}"
+                )
+                return
+
+            # Ensure timestamp is present; skip if not.
+            if not compact_crossover.get("timestamp"):
+                logger.warning(
+                    f"Crossover without timestamp skipped for JSON: {instrument_key}"
+                )
+                return
+
+            # Avoid duplicate crossovers (same timestamp).
+            existing_timestamps = {c.get("timestamp") for c in entry["crossovers"]}
+            if compact_crossover["timestamp"] in existing_timestamps:
+                logger.debug(
+                    f"Duplicate crossover skipped for JSON: {instrument_key} "
+                    f"timestamp={compact_crossover['timestamp']}"
+                )
+                return
+
+            entry["crossovers"].append(compact_crossover)
+            entry["total_crosses"] = len(entry["crossovers"])
+            # Update status to the signal of the latest crossover.
+            entry["status"] = compact_crossover.get("signal", "NO_CROSSOVER")
+            entry["last_updated"] = utc_now().isoformat()
+
+            # Write back atomically.
+            cls._write_json_atomic(trading_date, data)
+
+            logger.info(
+                f"JSON crossover appended for {instrument_key} | "
+                f"Date={trading_date} | "
+                f"Signal={entry['status']} | "
+                f"Total={entry['total_crosses']}"
+            )
 
     # =====================================================
     # CANDLE STORAGE - DISABLED FOR NEW FORMAT
@@ -375,9 +551,7 @@ class UpstoxRepository:
 
                 MongoApp.get_live_ema_collection().insert_one(compact_doc)
 
-                logger.info(
-                    f"Created compact live EMA document | {instrument_key}"
-                )
+                logger.info(f"Created compact live EMA document | {instrument_key}")
 
                 return compact_doc
 
@@ -606,6 +780,13 @@ class UpstoxRepository:
                 f"Signal={signal}"
             )
 
+            # --- JSON persistence: update after successful MongoDB save ---
+            UpstoxRepository._update_json_crossover(
+                instrument_key=instrument_key,
+                trading_date=trading_date,
+                crossover=compact_crossover,
+            )
+
             return result
 
         except Exception as ex:
@@ -691,6 +872,14 @@ class UpstoxRepository:
                 f"{instrument_key} | "
                 f"Inserted={len(new_crossovers)}"
             )
+
+            # --- JSON persistence: update for each new crossover ---
+            for crossover in new_crossovers:
+                UpstoxRepository._update_json_crossover(
+                    instrument_key=instrument_key,
+                    trading_date=trading_date,
+                    crossover=crossover,
+                )
 
             return result
 
