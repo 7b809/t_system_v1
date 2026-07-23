@@ -1,6 +1,6 @@
 # main.py
 
-import asyncio
+import asyncio,os
 from contextlib import asynccontextmanager
 
 import uvicorn
@@ -138,12 +138,16 @@ def health():
     }
 
 
+
 if __name__ == "__main__":
     logger.info("Starting Uvicorn server...")
+    
+    # Read dynamic PORT from Railway environment variable (defaults to 8000 locally)
+    port = int(os.getenv("PORT", 8000))
 
     uvicorn.run(
         "main:app",
         host="0.0.0.0",
-        port=8000,
-        reload=True,
+        port=port,
+        reload=False,  # Disable reload in production
     )
