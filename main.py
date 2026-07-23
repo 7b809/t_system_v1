@@ -7,6 +7,7 @@ import uvicorn
 from fastapi import FastAPI
 
 from api.cache_api import router as cache_router
+from api.system_api import router as system_router
 from core.config import settings
 from core.logger import get_logger
 from core.time_utils import get_ist_formatted, get_ist_now
@@ -20,8 +21,8 @@ logger = get_logger("main")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """
-    Application startup/shutdown lifecycle.
+    """Application startup/shutdown lifecycle.
+
     Initializes market analysis cache, performs live EMA daily cache reset,
     starts background market scheduler, and sends Telegram notifications.
     """
@@ -108,8 +109,9 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# Register APIs
+# Register Routers
 app.include_router(cache_router)
+app.include_router(system_router)
 
 
 @app.get("/")
@@ -136,12 +138,12 @@ def health():
     }
 
 
-if __name__ == "__main__":
-    logger.info("Starting Uvicorn server...")
+# if __name__ == "__main__":
+#     logger.info("Starting Uvicorn server...")
 
-    uvicorn.run(
-        "main:app",
-        host="0.0.0.0",
-        port=8000,
-        reload=True,
-    )
+#     uvicorn.run(
+#         "main:app",
+#         host="0.0.0.0",
+#         port=8000,
+#         reload=True,
+#     )
