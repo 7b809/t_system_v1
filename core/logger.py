@@ -1,92 +1,59 @@
+# core/logger.py
+
 import logging
 import os
-
 from logging.handlers import TimedRotatingFileHandler
-from config.settings import Settings
-LOG_DIR = "logs"
 
+from core.config import settings
+
+# Create logs directory if it doesn't exist
+LOG_DIR = "logs"
 os.makedirs(LOG_DIR, exist_ok=True)
 
 
-# ---------------------------------------------------------
-# Console log control
-# ---------------------------------------------------------
-# If True  -> show logs in CMD only for names in SHOW_LOG_FILE_NAMES
-# If False -> do not show any logs in CMD
-SHOW_LOGS = Settings.SHOW_LOGS
-
-
-# Add only the file/module/logger names for which logs should appear in CMD.
-#
-# Examples:
-# If logger is created using:
-#     logger = get_logger(__name__)
-#
-# and __name__ is:
-#     api.dashboard_api
-#
-# then logger_name becomes:
-#     dashboard_api
-#
-# So add "dashboard_api" below.
-SHOW_LOG_FILE_NAMES = {
-    "candle_builder",
-    "repositories",
-    "crossover_engine",
-}
-
-
-def get_logger(name: str) -> logging.Logger:
+def get_logger(filename: str) -> logging.Logger:
     """
-    Creates a logger for each module.
+    Returns a configured logger.
 
     Example:
-        logger = get_logger(__name__)
+        logger = get_logger("main")
+        logger.info("Application started")
 
-    Generates file logs like:
+    Log file:
         logs/main.log
-        logs/upstox_stream.log
-        logs/crossover_engine.log
-        logs/mongo_app.log
-
-    Console/CMD logs:
-        Printed only when SHOW_LOGS = True
-        and logger_name is present in SHOW_LOG_FILE_NAMES.
     """
 
-    logger_name = name.split(".")[-1]
+    logger = logging.getLogger(filename)
 
-    logger = logging.getLogger(logger_name)
-
+    # Prevent duplicate handlers
     if logger.handlers:
         return logger
 
-    logger.setLevel(logging.INFO)
+    logger.setLevel(getattr(logging, settings.LOG_LEVEL.upper(), logging.INFO))
 
-    log_file = os.path.join(LOG_DIR, f"{logger_name}.log")
+    log_file = os.path.join(LOG_DIR, f"{filename}.log")
 
     formatter = logging.Formatter(
-        fmt=("%(asctime)s | " "%(levelname)s | " "%(name)s | " "%(message)s"),
+        fmt="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
 
-    # ---------------------------------------------------------
-    # File handler - always enabled
-    # ---------------------------------------------------------
+    # File Handler (Rotates Daily)
     file_handler = TimedRotatingFileHandler(
-        filename=log_file, when="midnight", interval=1, backupCount=30, encoding="utf-8"
+        filename=log_file,
+        when="midnight",
+        interval=1,
+        backupCount=settings.LOG_RETENTION_DAYS,
+        encoding="utf-8",
     )
-
     file_handler.setFormatter(formatter)
-    logger.addHandler(file_handler)
 
-    # ---------------------------------------------------------
-    # Console/CMD handler - conditionally enabled
-    # ---------------------------------------------------------
-    if SHOW_LOGS and logger_name in SHOW_LOG_FILE_NAMES:
-        console_handler = logging.StreamHandler()
-        console_handler.setFormatter(formatter)
-        logger.addHandler(console_handler)
+    # Console Handler
+    console_handler = logging.StreamHandler()
+    console_handler.setFormatter(formatter)
+
+    logger.addHandler(file_handler)
+    logger.addHandler(console_handler)
 
     logger.propagate = False
 

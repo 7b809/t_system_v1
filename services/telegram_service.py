@@ -1,229 +1,178 @@
-import os
-import urllib.request
-import urllib.error
-import json
-import logging
+# services/telegram_service.py
 
-logger = logging.getLogger(__name__)
+import asyncio
+import httpx
+from core.config import settings
+from core.logger import get_logger
+from core.time_utils import get_ist_formatted
+
+logger = get_logger("telegram_service")
 
 
-class TelegramNotificationService:
+class TelegramService:
+    """
+    Asynchronous Telegram notification service to alert actions, execution updates,
+    and system errors directly to a Telegram Chat/Group.
+    """
 
     def __init__(self):
-        self.bot_token = os.getenv("TELEGRAM_BOT_TOKEN")
-        self.chat_id = os.getenv("TELEGRAM_CHAT_ID")
+        self.bot_token = settings.TELEGRAM_BOT_TOKEN
+        self.chat_id = settings.TELEGRAM_CHAT_ID
+        self.base_url = f"https://api.telegram.org/bot{self.bot_token}"
 
-        # ----------------------------------------------------
-        # Notification Enable Flag
-        # ----------------------------------------------------
-        self.tele_flag = True
-        
-        
-        # ----------------------------------------------------
-        # Credential Validation
-        # ----------------------------------------------------
-        self.credentials_valid = bool(self.bot_token and self.chat_id)
+    @property
+    def is_enabled(self) -> bool:
+        """Helper check to verify if Telegram notifications are enabled globally."""
+        # Fallback check for TELEGRAM_FLAG or TELE_FLAG in settings
+        flag = settings.TELEGRAM_FLAG
+        return bool(flag)
 
-        if not self.credentials_valid:
-            logger.warning("Telegram credentials missing. Notifications are disabled.")
+    async def send_message(self, message: str, parse_mode: str = "HTML") -> bool:
+        """Sends an asynchronous message to the configured Telegram chat if enabled."""
+        if not self.is_enabled:
+            logger.debug(
+                "Telegram notifications are disabled (tele_flag=False). Skipping message."
+            )
+            return False
 
-        elif not self.tele_flag:
-            logger.info("Telegram notifications are disabled via TELE_FLAG=false.")
+        if not self.bot_token or not self.chat_id:
+            logger.warning(
+                "Telegram credentials missing in environment/config. Message skipped."
+            )
+            return False
 
-        else:
-            logger.info("Telegram notification service enabled.")
-
-    def _send_message(self, text: str):
-        """
-        Send MarkdownV2 formatted Telegram message.
-        """
-
-        if not self.credentials_valid:
-            return
-
-        if not self.tele_flag:
-            logger.debug("Telegram message skipped because TELE_FLAG=false.")
-            return
-
-        url = f"https://api.telegram.org/" f"bot{self.bot_token}/sendMessage"
-
+        url = f"{self.base_url}/sendMessage"
         payload = {
             "chat_id": self.chat_id,
-            "text": text,
-            "parse_mode": "MarkdownV2",
+            "text": message,
+            "parse_mode": parse_mode,
+            "disable_web_page_preview": True,
         }
 
         try:
-            data = json.dumps(payload).encode("utf-8")
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                response = await client.post(url, json=payload)
 
-            req = urllib.request.Request(
-                url,
-                data=data,
-                headers={
-                    "Content-Type": "application/json",
-                },
-                method="POST",
-            )
+                if response.status_code == 200:
+                    logger.debug("Telegram alert sent successfully.")
+                    return True
+                else:
+                    logger.error(
+                        f"Failed to send Telegram message: {response.status_code} - {response.text}"
+                    )
+                    return False
 
-            with urllib.request.urlopen(req, timeout=10) as response:
-                body = response.read().decode("utf-8")
+        except Exception as e:
+            logger.error(f"Error sending message to Telegram: {e}")
+            return False
 
-                if response.status != 200:
-                    logger.error(f"Telegram API returned {response.status}: {body}")
+    def send_message_sync(self, message: str) -> None:
+        """Helper method to dispatch Telegram notification from synchronous functions."""
+        if not self.is_enabled:
+            return
 
-        except urllib.error.HTTPError as ex:
-            try:
-                error_body = ex.read().decode("utf-8")
-            except Exception:
-                error_body = ""
+        try:
+            loop = asyncio.get_running_loop()
+            loop.create_task(self.send_message(message))
+        except RuntimeError:
+            asyncio.run(self.send_message(message))
 
-            if ex.code == 401:
-                logger.error(
-                    "Telegram bot token is invalid or expired "
-                    f"(HTTP 401). {error_body}"
-                )
-            else:
-                logger.error(
-                    f"Telegram HTTP error {ex.code}: " f"{ex.reason} {error_body}"
-                )
+    # ------------------------------------------------------------------
+    # Pre-formatted Application Event Alerts
+    # ------------------------------------------------------------------
 
-        except Exception as ex:
-            logger.error(f"Failed to send Telegram notification: {ex}")
-
-    def escape_markdown(self, text: str) -> str:
-        """
-        Escape Telegram MarkdownV2 special characters.
-
-        Telegram MarkdownV2 reserved characters:
-        _ * [ ] ( ) ~ ` > # + - = | { } . !
-        """
-
-        escape_chars = r'_*~`>#+-=|{}.!'
-        return "".join(
-            f"\\{char}" if char in escape_chars else char for char in str(text)
-        )
-
-    def send_app_started(self, date_str: str):
-        """
-        Triggered when the application boots successfully.
-        """
+    async def notify_app_startup(self) -> None:
+        """Sends project startup notification."""
+        if not self.is_enabled:
+            return
 
         msg = (
-            "🚀 *System Initialization*\n\n"
-            f"📅 *Date:* {self.escape_markdown(date_str)}\n"
-            "🔄 *Status:* Market monitoring engine has booted successfully\\. "
-            "Verifying schedule\\.\\.\\."
+            f"🚀 <b>{settings.APP_NAME} Started</b>\n"
+            f"<b>Version:</b> {settings.APP_VERSION}\n"
+            f"<b>Time:</b> {get_ist_formatted()}\n"
+            f"<b>Status:</b> All systems operational."
         )
+        await self.send_message(msg)
 
-        self._send_message(msg)
-
-    def send_market_skipped(self, date_str: str, reason: str):
-        """
-        Triggered if today is a weekend or official trading holiday.
-        """
-
-        icon = "⏸️" if "weekend" in reason.lower() else "🌴"
+    async def notify_app_shutdown(self) -> None:
+        """Sends project shutdown notification."""
+        if not self.is_enabled:
+            return
 
         msg = (
-            f"{icon} *Market Session Skipped*\n\n"
-            f"📅 *Date:* {self.escape_markdown(date_str)}\n"
-            f"🚫 *Reason:* {self.escape_markdown(reason)}\n"
-            "😴 Engine entering standby until next scheduled day\\."
+            f"🛑 <b>{settings.APP_NAME} Stopped</b>\n"
+            f"<b>Time:</b> {get_ist_formatted()}\n"
+            f"<b>Status:</b> Lifespan terminated."
         )
+        await self.send_message(msg)
 
-        self._send_message(msg)
-
-    def send_preload_summary(
-        self,
-        total_strikes: int,
-        duration_secs: float,
-    ):
-        """
-        Triggered after runtime preload completes.
-        """
+    async def notify_cache_loaded(self, count: int, date_str: str) -> None:
+        """Sends daily cache load notification with date and item count."""
+        if not self.is_enabled:
+            return
 
         msg = (
-            "⚙️ *Preload Complete*\n\n"
-            f"📊 *Instruments Loaded:* `{total_strikes}`\n"
-            f"⏳ *Duration:* `{duration_secs:.2f}s`\n"
-            "✅ Runtime state initialized successfully\\.\n"
-            "🚀 Awaiting market feed startup\\."
+            f"📦 <b>Daily Market Analysis Cache Loaded</b>\n"
+            f"<b>Date:</b> {date_str}\n"
+            f"<b>Total Cached Items:</b> {count}\n"
+            f"<b>Time:</b> {get_ist_formatted()}"
         )
+        await self.send_message(msg)
 
-        self._send_message(msg)
-
-    def send_intraday_recovery_summary(
-        self,
-        recovered_instruments: int,
-    ):
-        """
-        Sent when startup intraday recovery completes.
-        """
+    async def notify_market_close(self) -> None:
+        """Sends market close alert at 3:30 PM."""
+        if not self.is_enabled:
+            return
 
         msg = (
-            "♻️ *Intraday Recovery Complete*\n\n"
-            f"📊 *Recovered Instruments:* `{recovered_instruments}`\n"
-            "✅ Runtime EMA state rebuilt using Mongo snapshots and intraday candles\\.\n"
-            "🚀 Live WebSocket startup beginning\\."
+            f"🔔 <b>Market Closed (03:30 PM)</b>\n"
+            f"<b>Time:</b> {get_ist_formatted()}\n"
+            f"Live calculation loop paused. Entering idle state until next trading day."
         )
+        await self.send_message(msg)
 
-        self._send_message(msg)
-
-    def send_market_stopped_summary(
-        self,
-        date_str: str,
-        success_count: int,
-        failed_count: int,
-    ):
-        """
-        Triggered during market close cleanup.
-        """
-
-        status_icon = "✅" if failed_count == 0 else "⚠️"
+    async def notify_pre_market_reset(self) -> None:
+        """Sends pre-market reset action status."""
+        if not self.is_enabled:
+            return
 
         msg = (
-            f"{status_icon} *Daily Session Concluded*\n\n"
-            f"📅 *Date:* {self.escape_markdown(date_str)}\n"
-            f"🟩 *Successful Updates:* `{success_count}`\n"
-            f"🟥 *Failed Streams/Calculations:* `{failed_count}`\n\n"
-            "🔒 All open 1\\-min candles flushed, socket detached, and memory maps purged\\."
+            f"🌅 <b>Pre-Market Daily Reset Completed</b>\n"
+            f"<b>Time:</b> {get_ist_formatted()}\n"
+            f"Cache refreshed & MongoDB reset for today's market session."
         )
+        await self.send_message(msg)
 
-        self._send_message(msg)
+    async def notify_ema_cross_found(
+        self, instrument_key: str, cross_type: str, price: float
+    ) -> None:
+        """Alerts when a new EMA 9/21 cross action occurs."""
+        if not self.is_enabled:
+            return
 
-    def send_upstox_token_expired(
-        self,
-        date_str: str,
-        error_details: str,
-    ):
-        """
-        Triggered when Upstox authentication fails.
-        """
+        emoji = "📈" if cross_type.upper() == "BULLISH" else "📉"
+        msg = (
+            f"{emoji} <b>EMA Cross Triggered!</b>\n"
+            f"<b>Instrument:</b> <code>{instrument_key}</code>\n"
+            f"<b>Signal:</b> {cross_type.upper()}\n"
+            f"<b>Price:</b> {price}\n"
+            f"<b>Time:</b> {get_ist_formatted()}"
+        )
+        await self.send_message(msg)
+
+    async def notify_error(self, context: str, error_msg: str) -> None:
+        """Sends an exception/error alert."""
+        if not self.is_enabled:
+            return
 
         msg = (
-            "🔑 *UPSTOX AUTHENTICATION FAILURE*\n\n"
-            f"📅 *Date:* {self.escape_markdown(date_str)}\n"
-            f"❌ *Error Details:* `{self.escape_markdown(error_details)}`\n\n"
-            "⚠️ *Action Required:* Please re\\-authenticate your broker session "
-            "to generate a fresh Access Token in MongoDB immediately\\."
+            f"⚠️ <b>System Error Alert</b>\n"
+            f"<b>Module:</b> {context}\n"
+            f"<b>Time:</b> {get_ist_formatted()}\n"
+            f"<b>Error:</b> <code>{error_msg}</code>"
         )
+        await self.send_message(msg)
 
-        self._send_message(msg)
 
-    def send_critical_alert(
-        self,
-        stage: str,
-        error_msg: str,
-    ):
-        """
-        Urgent alert requiring manual attention.
-        """
-
-        msg = (
-            "🚨 *CRITICAL SYSTEM ERROR*\n\n"
-            f"💥 *Stage:* {self.escape_markdown(stage)}\n"
-            f"❌ *Error:* `{self.escape_markdown(error_msg)}`\n\n"
-            "⚠️ *Manual intervention required immediately\\.*"
-        )
-
-        self._send_message(msg)
+# Singleton Export
+telegram_service = TelegramService()
